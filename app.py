@@ -14,6 +14,7 @@ AZURE_CONNECTION_STRING = os.environ.get('AZURE_STORAGE_CONNECTION_STRING')
 # Define the container name where videos.json is stored
 AZURE_CONTAINER_NAME = os.environ.get('AZURE_VIDEO_CONTAINER_NAME', 'climbing-journal-storage') # Default to 'videodata' if not set
 # Define the name of the metadata blob
+
 METADATA_BLOB_NAME = 'videos.json'
 
 # Determine the absolute path to the directory this script is in
