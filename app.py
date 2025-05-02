@@ -9,7 +9,7 @@ from flask import Flask, jsonify, send_from_directory, request
 from flask_cors import CORS
 from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient, ContentSettings, __version__ as azure_storage_version
 from azure.core.exceptions import ResourceNotFoundError
-from moviepy.editor import VideoFileClip # Import moviepy
+from moviepy import VideoFileClip # Import moviepy
 
 # --- Configuration ---
 # Load Azure Storage connection string from environment variable
