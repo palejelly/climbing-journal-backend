@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Climbing Video Gallery (Modal Player)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles */
+        body { font-family: 'Inter', sans-serif; }
+        .filter-button.active { background-color: #3b82f6; color: white; font-weight: bold; }
+        .video-item.hidden { display: none; }
+        #loading-indicator, #upload-indicator { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 1.5rem; font-weight: bold; color: #3b82f6; z-index: 100; background-color: rgba(255, 255, 255, 0.8); padding: 1rem 2rem; border-radius: 0.5rem; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); }
+        #loading-indicator.hidden, #upload-indicator.hidden { display: none; }
+        /* Upload form styles */
+        #upload-form label { display: block; margin-bottom: 0.25rem; font-weight: 500; color: #374151; }
+        #upload-form input[type="text"],
+        #upload-form input[type="file"] { display: block; width: 100%; padding: 0.5rem; border: 1px solid #d1d5db; border-radius: 0.375rem; margin-bottom: 0.75rem; font-size: 0.875rem; }
+        #upload-form input[type="file"] { padding: 0.3rem; }
+        #upload-form .form-actions { display: flex; gap: 0.5rem; margin-top: 1rem; }
+        #upload-form button { color: white; padding: 0.6rem 1.2rem; border: none; border-radius: 0.375rem; font-weight: 600; cursor: pointer; transition: background-color 0.2s; }
+        #upload-button { background-color: #10b981; }
+        #upload-button:hover { background-color: #059669; }
+        #cancel-upload-button { background-color: #6b7280; }
+        #cancel-upload-button:hover { background-color: #4b5563; }
+        #upload-button:disabled { background-color: #a1a1aa; cursor: not-allowed; }
+        #upload-status { margin-top: 1rem; font-weight: 500; }
+        .status-success { color: #10b981; }
+        .status-error { color: #ef4444; }
+        /* Show upload button styles */
+         #show-upload-button, #sign-in-button{ background-color: #3b82f6; color: white; padding: 0.6rem 1.2rem; border: none; border-radius: 0.375rem; font-weight: 600; cursor: pointer; transition: background-color 0.2s; }
+         #show-upload-button:hover, #sign-in-button:hover { background-color: #2563eb; }
+
+        /* Video Modal Styles */
+        #video-modal-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background-color: rgba(0, 0, 0, 0.7); display: flex;
+            justify-content: center; align-items: center; z-index: 1000;
+            opacity: 0; visibility: hidden; transition: opacity 0.3s ease, visibility 0.3s ease;
+        }
+        #video-modal-overlay.visible { opacity: 1; visibility: visible; }
+        #video-modal-content {
+            background-color: #1f2937; padding: 1rem; border-radius: 0.5rem;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5); max-width: 90vw; max-height: 90vh;
+            position: relative; display: flex; flex-direction: column;
+        }
+        #video-modal-title { color: #f3f4f6; font-size: 1.25rem; font-weight: 600; margin-bottom: 0.75rem; text-align: center; }
+        #modal-video-player { width: 100%; max-height: calc(90vh - 80px); border-radius: 0.25rem; background-color: #000; }
+        #modal-close-button {
+            position: absolute; top: -10px; right: -10px; background-color: #ef4444;
+            color: white; border: none; border-radius: 50%; width: 30px; height: 30px;
+            font-size: 1.2rem; font-weight: bold; line-height: 30px; text-align: center;
+            cursor: pointer; box-shadow: 0 2px 5px rgba(0,0,0,0.3); z-index: 1001;
+        }
+        #modal-close-button:hover { background-color: #dc2626; }
+        /* Make video item clickable */
+        .video-item { cursor: pointer; }
+        /* Thumbnail image styling */
+        .video-item img {
+            width: 100%;
+            height: 12rem; /* h-48 */
+            /* Changed object-cover to object-contain */
+            object-fit: contain; /* Scales the image while preserving aspect ratio */
+            background-color: #e5e7eb; /* Optional: Add a background color for letterboxing */
+        }
+
+    </style>
+     <link rel="preconnect" href="https://fonts.googleapis.com">
+     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+</head>
+<body class="bg-gray-100 p-4 md:p-8">
+
+    <div class="container mx-auto max-w-6xl">
+        <h1 class="text-3xl font-bold text-center text-gray-800 mb-4">My Climbing Videos</h1>
+
+        <div class="text-center mb-8">
+            <form id="login-form">
+                <input placeholder="Username", type="text", name="username", required>
+                <input placeholder="Password", type="password", name="password", required>
+                <input type="submit", value="Login">
+            </form>    
+            <button id="show-upload-button">Upload New Video</button>
+        </div>
+
+        <div id="upload-section" class="bg-white p-6 rounded-lg shadow-md mb-8 hidden">
+            <h2 class="text-2xl font-semibold text-gray-700 mb-4">Upload New Video</h2>
+            <form id="upload-form">
+                <div><label for="videoTitle">Title:</label><input type="text" id="videoTitle" name="title" required></div>
+                <div><label for="videoTags">Tags (comma-separated):</label><input type="text" id="videoTags" name="tags" placeholder="e.g., bouldering, indoor, v5"></div>
+                <div><label for="videoFile">Video File:</label><input type="file" id="videoFile" name="videoFile" accept="video/*" required></div>
+                <div class="form-actions">
+                     <button type="submit" id="upload-button">Upload Video</button>
+                     <button type="button" id="cancel-upload-button">Cancel</button>
+                 </div>
+            </form>
+            <div id="upload-status"></div>
+            <div id="upload-indicator" class="hidden">Uploading...</div>
+        </div>
+
+        <div id="gallery-section">
+            <div id="filter-container" class="mb-8 text-center space-y-2 md:space-y-0 md:space-x-2">
+                <h2 class="text-xl font-semibold mb-2 text-gray-700">Filter by Tag:</h2>
+                <span id="filter-loading" class="text-gray-500">Loading filters...</span>
+            </div>
+            <div id="video-grid" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+                </div>
+             <div id="no-results-message" class="text-center text-gray-500 mt-8 hidden">
+                No videos match the selected filter.
+            </div>
+        </div>
+
+        <div id="loading-indicator" class="hidden">Loading Videos...</div>
+        <div id="error-message" class="text-center text-red-600 font-semibold mt-8 hidden"></div>
+
+        <div id="video-modal-overlay">
+            <div id="video-modal-content">
+                <button id="modal-close-button" title="Close">&times;</button>
+                <h3 id="video-modal-title">Video Title</h3>
+                <video id="modal-video-player" controls preload="metadata">
+                    Your browser does not support the video tag.
+                </video>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        // --- Configuration ---
+        // const API_BASE_URL = 'https://climbing-journal-adhycrchdxffb6br.eastus-01.azurewebsites.net';
+        const API_BASE_URL = 'http://127.0.0.1:3000';
+
+        // --- DOM Elements ---
+        const filterContainer = document.getElementById('filter-container');
+        const filterLoading = document.getElementById('filter-loading');
+        const videoGrid = document.getElementById('video-grid');
+        const noResultsMessage = document.getElementById('no-results-message');
+        const loadingIndicator = document.getElementById('loading-indicator');
+        const errorMessage = document.getElementById('error-message');
+        // Upload elements
+        const uploadSection = document.getElementById('upload-section');
+        const gallerySection = document.getElementById('gallery-section');
+        const showUploadButton = document.getElementById('show-upload-button');
+        const cancelUploadButton = document.getElementById('cancel-upload-button');
+        const uploadForm = document.getElementById('upload-form');
+        const loginForm = document.getElementById('login-form');
+        const videoTitleInput = document.getElementById('videoTitle');
+        const videoTagsInput = document.getElementById('videoTags');
+        const videoFileInput = document.getElementById('videoFile');
+        const uploadButton = document.getElementById('upload-button');
+        const uploadStatus = document.getElementById('upload-status');
+        const uploadIndicator = document.getElementById('upload-indicator');
+        // Modal elements
+        const videoModalOverlay = document.getElementById('video-modal-overlay');
+        const videoModalTitle = document.getElementById('video-modal-title');
+        const modalVideoPlayer = document.getElementById('modal-video-player');
+        const modalCloseButton = document.getElementById('modal-close-button');
+
+
+        // --- State ---
+        let activeFilter = 'all';
+        let allVideosData = [];
+
+        // --- Functions ---
+
+        // (fetchData, showError, clearError, showLoading, showUploading, showUploadStatus remain the same)
+        async function fetchData(endpoint, options = {}) { /* ... same as before ... */
+            try {
+                const response = await fetch(`${API_BASE_URL}${endpoint}`, options);
+                if (!response.ok) {
+                    let errorData; try { errorData = await response.json(); } catch (e) {}
+                    const errorMsg = errorData?.error || `HTTP error! Status: ${response.status}`;
+                    throw new Error(errorMsg);
+                }
+                 const contentType = response.headers.get("content-type");
+                 if (contentType && contentType.indexOf("application/json") !== -1) { return await response.json(); }
+                 else { return await response.text(); }
+            } catch (error) {
+                console.error(`Error fetching ${endpoint}:`, error);
+                showError(`API Error: ${error.message}. Please check backend logs.`);
+                throw error;
+            }
+        }
+        function showError(message) { /* ... same as before ... */
+            errorMessage.textContent = message;
+            errorMessage.classList.remove('hidden');
+            loadingIndicator.classList.add('hidden');
+            filterLoading.classList.add('hidden');
+            uploadIndicator.classList.add('hidden');
+        }
+        function clearError() { /* ... same as before ... */
+            errorMessage.textContent = '';
+            errorMessage.classList.add('hidden');
+        }
+        function showLoading(show) { /* ... same as before ... */
+            loadingIndicator.classList.toggle('hidden', !show);
+        }
+        function showUploading(show) { /* ... same as before ... */
+            uploadIndicator.classList.toggle('hidden', !show);
+            uploadButton.disabled = show;
+            cancelUploadButton.disabled = show;
+        }
+        function showUploadStatus(message, isSuccess) { /* ... same as before ... */
+             uploadStatus.textContent = message;
+             uploadStatus.className = 'mt-4 font-medium';
+             if (isSuccess) { uploadStatus.classList.add('status-success'); }
+             else { uploadStatus.classList.add('status-error'); }
+        }
+
+
+        // --- UI Toggling ---
+        function showUploadView() { /* ... same as before ... */
+            uploadSection.classList.remove('hidden');
+            gallerySection.classList.add('hidden');
+            showUploadButton.classList.add('hidden');
+            uploadForm.reset();
+            showUploadStatus('', false);
+            clearError();
+        }
+        function showGalleryView() { /* ... same as before ... */
+            uploadSection.classList.add('hidden');
+            gallerySection.classList.remove('hidden');
+            showUploadButton.classList.remove('hidden');
+        }
+
+        // --- Video Modal Functions ---
+        function openVideoModal(videoUrl, title) {
+            if (!videoUrl || videoUrl === '#') {
+                showError("Video URL is missing or invalid.");
+                return;
+            }
+            clearError(); // Clear any previous errors
+            videoModalTitle.textContent = title || 'Untitled Video';
+            modalVideoPlayer.src = videoUrl;
+            modalVideoPlayer.load(); // Important to load the new source
+            videoModalOverlay.classList.add('visible');
+            // Optional: Autoplay (might be blocked by browser policies)
+            // modalVideoPlayer.play().catch(e => console.warn("Autoplay prevented:", e));
+        }
+
+        function closeVideoModal() {
+            videoModalOverlay.classList.remove('visible');
+            // Pause video and reset src to stop background loading/playing
+            modalVideoPlayer.pause();
+            modalVideoPlayer.src = ''; // Clear source
+        }
+
+
+        // --- Gallery Filtering Functions ---
+        async function displayFilterButtons() { /* ... same as before ... */
+            try {
+                filterLoading.classList.remove('hidden');
+                const tags = await fetchData('/api/tags');
+                filterLoading.classList.add('hidden');
+                const heading = filterContainer.querySelector('h2');
+                filterContainer.innerHTML = '';
+                if (heading) filterContainer.appendChild(heading);
+                const allButton = createFilterButton('all', 'Show All');
+                if (activeFilter === 'all') allButton.classList.add('active');
+                filterContainer.appendChild(allButton);
+                tags.sort().forEach(tag => {
+                    const button = createFilterButton(tag, tag);
+                     if (activeFilter === tag) button.classList.add('active');
+                    filterContainer.appendChild(button);
+                });
+            } catch (error) { filterLoading.textContent = 'Error loading filters.'; }
+        }
+        function createFilterButton(filterValue, buttonText) { /* ... same as before ... */
+            const button = document.createElement('button');
+            button.classList.add('filter-button', 'px-4', 'py-2', 'm-1', 'border', 'border-gray-300', 'rounded-full', 'text-sm', 'font-medium', 'text-gray-700', 'bg-white', 'hover:bg-gray-200', 'transition', 'duration-150', 'ease-in-out', 'capitalize');
+            button.dataset.filter = filterValue;
+            button.textContent = buttonText;
+            button.addEventListener('click', handleFilterClick);
+            return button;
+        }
+         function handleFilterClick(event) { /* ... same as before ... */
+            const clickedButton = event.target;
+            activeFilter = clickedButton.dataset.filter;
+            document.querySelectorAll('.filter-button').forEach(btn => { btn.classList.toggle('active', btn === clickedButton); });
+            filterVideos();
+        }
+
+
+        // --- Video Display Functions ---
+         async function displayVideos() { /* ... same as before ... */
+            showLoading(true);
+            clearError();
+            videoGrid.innerHTML = '';
+            try {
+                allVideosData = await fetchData('/api/videos');
+                if (!Array.isArray(allVideosData)) {
+                     console.error("Received non-array data for videos:", allVideosData);
+                     showError("Received invalid video data from server.");
+                     allVideosData = [];
+                }
+                if (allVideosData.length === 0) {
+                    noResultsMessage.textContent = "No videos found in the library.";
+                    noResultsMessage.classList.remove('hidden');
+                } else {
+                    noResultsMessage.classList.add('hidden');
+                    allVideosData.forEach(video => addVideoToGrid(video));
+                    filterVideos();
+                }
+            } catch (error) { videoGrid.innerHTML = ''; }
+            finally { showLoading(false); }
+        }
+        function addVideoToGrid(video) { /* ... same as before ... */
+             if (!video || typeof video !== 'object') { console.error("Attempted to add invalid video data to grid:", video); return; }
+            const videoElement = createVideoItem(video);
+            videoGrid.appendChild(videoElement);
+        }
+
+        // MODIFIED: Create HTML element for a single video, making it clickable for modal
+        function createVideoItem(video) {
+            const div = document.createElement('div');
+            div.classList.add(
+                'video-item', 'bg-white', 'rounded-lg', 'shadow-md',
+                'overflow-hidden', 'transition-all', 'duration-300', 'ease-in-out', 'hover:shadow-lg' // Added hover effect
+            );
+            const tags = video.tags || [];
+            const title = video.title || 'Untitled';
+            const thumb = video.thumbnail || 'https://placehold.co/600x400/cccccc/1f2937?text=No+Thumb';
+            const videoUrl = video.videoUrl || '#'; // Get video URL
+            console.log("this is the thumbnail: ", video.thumbnail);
+            // Store data needed for the modal
+            div.dataset.tags = JSON.stringify(tags);
+            div.dataset.videoUrl = videoUrl; // Store video URL
+            div.dataset.videoTitle = title; // Store title
+
+            // Make the image clickable (removed the <a> tag wrapper)
+            div.innerHTML = `
+                <img src="${thumb}" alt="${title}" class="w-full h-48 object-cover" onerror="this.src='https://placehold.co/600x400/fecaca/1f2937?text=Image+Error'; this.alt='Error loading image'">
+                <div class="p-4">
+                    <h3 class="font-semibold text-gray-800 mb-1 truncate" title="${title}">${title}</h3>
+                    <div class="text-xs text-gray-500 space-x-1">
+                        ${tags.map(tag => `<span class="inline-block bg-gray-200 rounded-full px-2 py-0.5 capitalize">${tag}</span>`).join(' ')}
+                    </div>
+                </div>
+            `;
+
+            // Add click listener to the whole div to open the modal
+            div.addEventListener('click', () => {
+                openVideoModal(div.dataset.videoUrl, div.dataset.videoTitle);
+            });
+
+            return div;
+        }
+
+        function filterVideos() { /* ... same as before ... */
+            let hasVisibleVideos = false;
+            const videoItems = videoGrid.querySelectorAll('.video-item');
+            if (videoItems.length === 0 && allVideosData.length === 0) {
+                 noResultsMessage.textContent = "No videos found in the library.";
+                 noResultsMessage.classList.remove('hidden');
+                 return;
+            }
+            videoItems.forEach(item => {
+                const itemTags = JSON.parse(item.dataset.tags || '[]');
+                const shouldShow = activeFilter === 'all' || itemTags.includes(activeFilter);
+                item.classList.toggle('hidden', !shouldShow);
+                if (shouldShow) hasVisibleVideos = true;
+            });
+            noResultsMessage.classList.toggle('hidden', hasVisibleVideos || allVideosData.length === 0);
+             if (!hasVisibleVideos && allVideosData.length > 0) { noResultsMessage.textContent = "No videos match the selected filter."; }
+             else if (!hasVisibleVideos && allVideosData.length === 0) { noResultsMessage.textContent = "No videos found in the library."; }
+        }
+
+
+        // --- Upload Logic ---
+        async function handleUpload(event) { /* ... same as before ... */
+            event.preventDefault();
+            clearError();
+            showUploadStatus('', false);
+            const title = videoTitleInput.value.trim();
+            const tags = videoTagsInput.value.trim();
+            const file = videoFileInput.files[0];
+            if (!file || !title) { showUploadStatus('Title and video file are required.', false); return; }
+            const formData = new FormData();
+            formData.append('title', title);
+            formData.append('tags', tags);
+            formData.append('videoFile', file);
+            showUploading(true);
+            try {
+                const result = await fetchData('/api/upload', { method: 'POST', body: formData });
+                showUploadStatus(result.message || 'Upload successful!', true);
+                await displayVideos();
+                await displayFilterButtons();
+                showGalleryView();
+            } catch (error) { /* Error handled by fetchData */ }
+            finally { showUploading(false); }
+        }
+
+        // -- Login logic -- 
+        async function handleLogin(event){
+            event.preventDefault();
+            clearError();
+            const username = event.srcElement[0].value // this is username
+            const password = event.srcElement[1].value // this is password 
+            console.log(username, password);
+            const formData = new FormData();
+            // need to attach the username and password to the formData
+            formData.append('username', username);
+            formData.append('password', password);
+            try{
+                const result = await fetchData('/auth/login', {method: 'POST', body: formData });
+            } catch (error){ console.log(error); }
+            finally {}
+        }
+
+
+        // --- Initialization ---
+        document.addEventListener('DOMContentLoaded', () => {
+            clearError();
+            // Add event listeners for toggling views
+            showUploadButton.addEventListener('click', showUploadView);
+            cancelUploadButton.addEventListener('click', showGalleryView);
+            // Add event listeners for the modal
+            modalCloseButton.addEventListener('click', closeVideoModal);
+            videoModalOverlay.addEventListener('click', (event) => {
+                // Close if clicked outside the content area
+                if (event.target === videoModalOverlay) {
+                    closeVideoModal();
+                }
+            });
+            // Add event listener for the upload form submission
+            uploadForm.addEventListener('submit', handleUpload);
+            loginForm.addEventListener('submit', handleLogin);
+            // Initial load of gallery data
+            displayFilterButtons();
+            displayVideos();
+            // Ensure gallery is shown by default
+            showGalleryView();
+        });
+
+    </script>
+
+</body>
+</html>

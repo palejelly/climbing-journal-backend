@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Join - Climbing Video Journal</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles to match index.html */
+        body { font-family: 'Inter', sans-serif; }
+        #join-form label {
+            display: block;
+            margin-bottom: 0.25rem;
+            font-weight: 500;
+            color: #374151; /* gray-700 */
+        }
+        #join-form input[type="text"],
+        #join-form input[type="password"] {
+            display: block;
+            width: 100%;
+            padding: 0.65rem;
+            border: 1px solid #d1d5db; /* gray-300 */
+            border-radius: 0.375rem; /* rounded-md */
+            margin-bottom: 1rem;
+            font-size: 1rem;
+        }
+        #join-button {
+            width: 100%;
+            color: white;
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: 0.375rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.2s;
+            background-color: #3b82f6; /* blue-500 */
+        }
+        #join-button:hover {
+            background-color: #2563eb; /* blue-600 */
+        }
+        #join-button:disabled {
+            background-color: #a1a1aa; /* gray-400 */
+            cursor: not-allowed;
+        }
+        #status-message {
+            margin-top: 1rem;
+            font-weight: 500;
+            text-align: center;
+        }
+        .status-success { color: #10b981; /* green-500 */ }
+        .status-error { color: #ef4444; /* red-500 */ }
+    </style>
+     <link rel="preconnect" href="https://fonts.googleapis.com">
+     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+</head>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen p-4">
+
+    <div class="container mx-auto max-w-md">
+        <h1 class="text-3xl font-bold text-center text-gray-800 mb-6">Create an Account</h1>
+
+        <div class="bg-white p-8 rounded-lg shadow-md">
+            <form id="join-form">
+                <div>
+                    <label for="username">Username</label>
+                    <input type="text" id="username" name="username" required>
+                </div>
+                <div>
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password" required>
+                </div>
+                <div>
+                    <label for="confirm-password">Confirm Password</label>
+                    <input type="password" id="confirm-password" name="confirm-password" required>
+                </div>
+                <button type="submit" id="join-button">Create Account</button>
+            </form>
+            <div id="status-message"></div>
+        </div>
+
+        <div class="text-center mt-6">
+            <p class="text-gray-600">
+                Already have an account?
+                <a href="/" class="font-semibold text-blue-500 hover:text-blue-600">Sign In</a>
+            </p>
+        </div>
+    </div>
+
+    <script>
+        // --- Configuration ---
+        const API_BASE_URL = 'http://127.0.0.1:3000';
+
+        // --- DOM Elements ---
+        const joinForm = document.getElementById('join-form');
+        const usernameInput = document.getElementById('username');
+        const passwordInput = document.getElementById('password');
+        const confirmPasswordInput = document.getElementById('confirm-password');
+        const joinButton = document.getElementById('join-button');
+        const statusMessage = document.getElementById('status-message');
+
+        // --- Functions ---
+        function showStatus(message, isSuccess) {
+             statusMessage.textContent = message;
+             statusMessage.className = 'mt-4 font-medium text-center';
+             if (isSuccess) {
+                 statusMessage.classList.add('status-success');
+             } else {
+                 statusMessage.classList.add('status-error');
+             }
+        }
+
+        async function handleJoin(event) {
+            event.preventDefault();
+            showStatus('', false); // Clear previous messages
+            joinButton.disabled = true;
+
+            const username = usernameInput.value.trim();
+            const password = passwordInput.value;
+            const confirmPassword = confirmPasswordInput.value;
+
+            // --- Client-side validation ---
+            if (!username || !password) {
+                showStatus('Username and password cannot be empty.', false);
+                joinButton.disabled = false;
+                return;
+            }
+            if (password !== confirmPassword) {
+                showStatus('Passwords do not match.', false);
+                joinButton.disabled = false;
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/auth/join`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ username, password }),
+                });
+
+                const result = await response.json();
+
+                if (!response.ok) {
+                    // Use the error message from the API
+                    throw new Error(result.error || `HTTP error! Status: ${response.status}`);
+                }
+
+                showStatus(result.message, true);
+                
+                // Redirect to login page after a short delay
+                setTimeout(() => {
+                    window.location.href = '/'; // Redirect to index.html
+                }, 2000);
+
+            } catch (error) {
+                console.error('Join failed:', error);
+                showStatus(error.message, false);
+            } finally {
+                // Re-enable button unless successful
+                if (!statusMessage.classList.contains('status-success')) {
+                    joinButton.disabled = false;
+                }
+            }
+        }
+
+        // --- Initialization ---
+        document.addEventListener('DOMContentLoaded', () => {
+            joinForm.addEventListener('submit', handleJoin);
+        });
+    </script>
+
+</body>
+</html>

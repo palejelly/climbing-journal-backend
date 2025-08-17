@@ -6,10 +6,8 @@ import uuid # For generating unique blob names
 import tempfile # For creating temporary directories/files
 import shutil # For removing temporary directories
 from flask import Flask, jsonify, send_from_directory, request
-from flask_cors import CORS
-from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient, ContentSettings, __version__ as azure_storage_version
-from azure.core.exceptions import ResourceNotFoundError
-from moviepy import VideoFileClip # Import moviepy
+
+from werkzeug.security import generate_password_hash, check_password_hash
 
 # --- Configuration ---
 # Load Azure Storage connection string from environment variable
@@ -27,6 +25,9 @@ AZURE_THUMBNAILS_CONTAINER_NAME = os.environ.get('AZURE_THUMBNAILS_CONTAINER_NAM
 
 
 METADATA_BLOB_NAME = 'videos.json'
+USER_METADATA_BLOB_NAME = 'users.json'
+
+
 # NEW: Thumbnail generation settings
 THUMBNAIL_TIME_SECONDS = 5.0 # Time in seconds to grab the frame
 THUMBNAIL_FILENAME_SUFFIX = '_thumb.jpg' # Suffix for thumbnail files
@@ -40,8 +41,16 @@ STATIC_FOLDER = os.path.join(BASE_DIR, 'frontend')
 # JUNHO TODO : this part needs to be studied. 
 app = Flask(__name__, static_folder=STATIC_FOLDER, static_url_path='')
 
-# --- CORS Configuration ---
-CORS(app) # Keep CORS enabled
+try: 
+    from flask_cors import CORS
+    from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient, ContentSettings, __version__ as azure_storage_version
+    from azure.core.exceptions import ResourceNotFoundError
+    from moviepy import VideoFileClip # Import moviepy
+
+    # --- CORS Configuration ---
+    CORS(app) # Keep CORS enabled
+except:
+    pass
 
 # --- Helper Function ---
 def get_blob_service_client():
@@ -54,8 +63,6 @@ def get_blob_service_client():
     except Exception as e:
         print(f"Error creating BlobServiceClient: {e}")
         return None
-
-
 
 def load_videos_from_azure(blob_service_client):
     """Loads video metadata by downloading videos.json from Azure Blob Storage."""
@@ -118,7 +125,6 @@ def upload_blob_to_azure(blob_service_client, container_name, blob_name, file_st
         print(f"Error uploading blob '{blob_name}' to container '{container_name}': {e}")
         return None
 
-
 def generate_thumbnail(video_temp_path, thumb_temp_path, timestamp_sec):
     """Generates a thumbnail from a video file using moviepy."""
     try:
@@ -140,7 +146,113 @@ def generate_thumbnail(video_temp_path, thumb_temp_path, timestamp_sec):
         print("Ensure FFmpeg is installed and accessible in the environment.")
         return False
 
+
+# --- NEW: Helper Functions for User Data ---
+def load_users_from_azure(blob_service_client):
+    """Loads user data from users.json in Azure Blob Storage."""
+    if not blob_service_client: return []
+    try:
+        blob_client = blob_service_client.get_blob_client(
+            container=AZURE_METADATA_CONTAINER_NAME, blob=USER_METADATA_BLOB_NAME
+        )
+        print(f"Attempting to download blob '{USER_METADATA_BLOB_NAME}' from container '{AZURE_METADATA_CONTAINER_NAME}'...")
+        download_stream = blob_client.download_blob()
+        users = json.loads(download_stream.readall())
+        print(f"Successfully downloaded and parsed user data.")
+        return users
+    except ResourceNotFoundError:
+        print(f"User data blob '{USER_METADATA_BLOB_NAME}' not found. Starting with an empty list.")
+        return [] # If no users file exists, start with an empty list
+    except Exception as e:
+        print(f"An error occurred loading user data: {e}")
+        return None # Indicate error
+
+def save_users_to_azure(blob_service_client, users_data):
+    """Uploads the updated user list back to users.json in Azure Blob Storage."""
+    if not blob_service_client: return False
+    try:
+        blob_client = blob_service_client.get_blob_client(
+            container=AZURE_METADATA_CONTAINER_NAME, blob=USER_METADATA_BLOB_NAME
+        )
+        updated_json_data = json.dumps(users_data, indent=2)
+        blob_client.upload_blob(updated_json_data.encode('utf-8'), overwrite=True,
+                                content_settings=ContentSettings(content_type='application/json'))
+        print(f"Successfully uploaded updated user data to blob '{USER_METADATA_BLOB_NAME}'.")
+        return True
+    except Exception as e:
+        print(f"An error occurred saving user data: {e}")
+        return False
+
+
 # --- API Routes ---
+
+@app.route('/auth/join', methods=['POST'])
+def handle_join():
+    """API endpoint for user registration (signing up)."""
+    data = request.get_json()
+    if not data or not data.get('username') or not data.get('password'):
+        return jsonify({"error": "Username and password are required"}), 400
+
+    username = data['username']
+    password = data['password']
+
+    blob_service_client = get_blob_service_client()
+    if not blob_service_client:
+        return jsonify({"error": "Azure Storage connection not configured"}), 500
+
+    users = load_users_from_azure(blob_service_client)
+    if users is None:
+        return jsonify({"error": "Failed to load user data"}), 500
+
+    # Check if username already exists
+    if any(user['username'] == username for user in users):
+        return jsonify({"error": "Username already exists"}), 409 # 409 Conflict
+
+    # Hash the password for secure storage
+    hashed_password = generate_password_hash(password)
+
+    # Add new user
+    new_user = {"username": username, "password": hashed_password}
+    users.append(new_user)
+
+    # Save updated user list back to Azure
+    if not save_users_to_azure(blob_service_client, users):
+        return jsonify({"error": "Failed to save new user data"}), 500
+
+    return jsonify({"message": f"User '{username}' created successfully"}), 201
+
+
+@app.route('/auth/login', methods=['POST'])
+def handle_login():
+    """API endpoint for user authentication (signing in)."""
+    data = request.get_json()
+    if not data or not data.get('username') or not data.get('password'):
+        return jsonify({"error": "Username and password are required"}), 400
+
+    username = data['username']
+    password = data['password']
+
+    blob_service_client = get_blob_service_client()
+    if not blob_service_client:
+        return jsonify({"error": "Azure Storage connection not configured"}), 500
+
+    users = load_users_from_azure(blob_service_client)
+    if users is None:
+        return jsonify({"error": "Failed to load user data"}), 500
+
+    # Find the user
+    user = next((user for user in users if user['username'] == username), None)
+
+    # Check if user exists and if the password is correct
+    if user and check_password_hash(user['password'], password):
+        # In a real app, you would generate and return a JWT (JSON Web Token) here.
+        # For simplicity, we'll just return a success message.
+        return jsonify({"message": f"Login successful for user '{username}'"}), 200
+    else:
+        return jsonify({"error": "Invalid username or password"}), 401 # 401 Unauthorized
+
+
+
 @app.route('/api/videos', methods=['GET'])
 def get_videos():
     """API endpoint to get the list of all videos from Azure Blob."""
@@ -295,6 +407,10 @@ def upload_video():
 @app.route('/')
 def serve_index():
     return send_from_directory(app.static_folder, 'index.html')
+
+@app.route('/join')
+def serve_join():
+    return send_from_directory(app.static_folder, 'join.html')
 
 # --- Main Execution ---
 if __name__ == '__main__':
