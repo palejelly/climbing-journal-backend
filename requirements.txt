@@ -3,4 +3,4 @@ Flask-Cors
 azure-storage-blob
 gunicorn # For production deployment on App Service
 moviepy
-werkzeug.security
+werkzeug
