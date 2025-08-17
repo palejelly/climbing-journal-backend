@@ -394,17 +394,38 @@
         async function handleLogin(event){
             event.preventDefault();
             clearError();
-            const username = event.srcElement[0].value // this is username
-            const password = event.srcElement[1].value // this is password 
-            console.log(username, password);
-            const formData = new FormData();
+            
+            const form = event.target;
+            const username = form.username.value;
+            const password = form.password.value;
+
+            // 1. Create a simple JavaScript object with the login data.
+            const loginData = {
+                username: username,
+                password: password
+            };
+
             // need to attach the username and password to the formData
-            formData.append('username', username);
-            formData.append('password', password);
-            try{
-                const result = await fetchData('/auth/login', {method: 'POST', body: formData });
-            } catch (error){ console.log(error); }
-            finally {}
+            try {
+                // 2. Send the data using the correct method, headers, and body.
+                const result = await fetchData('/auth/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json', // Tell the server we're sending JSON
+                    },
+                    body: JSON.stringify(loginData), // Convert the object to a JSON string
+                });
+
+                // On success, you can update the UI
+                console.log('Login successful:', result.message);
+                loginForm.innerHTML = `<p class="text-green-600 font-semibold">${result.message}</p>`;
+                // You might also want to hide the "Upload" button if login fails
+                // and show it if login succeeds.
+
+            } catch (error) {
+                // The generic fetchData function will automatically call showError
+                console.error("Login failed from UI:", error);
+            }
         }
 
 
