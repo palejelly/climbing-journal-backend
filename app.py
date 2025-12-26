@@ -224,6 +224,8 @@ def handle_join():
 
 @app.route('/auth/login', methods=['POST'])
 def handle_login():
+
+    # need to update join/login to sql server.
     """API endpoint for user authentication (signing in)."""
     data = request.get_json()
     if not data or not data.get('username') or not data.get('password'):
@@ -299,6 +301,10 @@ def upload_video():
             return jsonify({"error": "No selected video file"}), 400
 
         title = request.form.get('title', 'Untitled Video')
+
+        # LET's add error handling to the form.
+        user_id = request.form.get('user_id')
+        
         tags_string = request.form.get('tags', '')
         tags_list = [tag.strip() for tag in tags_string.split(',') if tag.strip()]
 
@@ -370,7 +376,8 @@ def upload_video():
             "title": title,
             "thumbnail": thumbnail_url, # Use the generated (or placeholder) thumbnail URL
             "videoUrl": video_url,
-            "tags": tags_list
+            "tags": tags_list,
+            "user_id": user_id,
         }
         videos_metadata.append(new_video_entry)
 
