@@ -125,27 +125,39 @@ def upload_blob_to_azure(blob_service_client, container_name, blob_name, file_st
         print(f"Error uploading blob '{blob_name}' to container '{container_name}': {e}")
         return None
 
+import subprocess
+
 def generate_thumbnail(video_temp_path, thumb_temp_path, timestamp_sec):
-    """Generates a thumbnail from a video file using moviepy."""
+    """
+    Generates a thumbnail using a direct FFmpeg call to bypass 
+    MoviePy 2.2.1 metadata parsing errors.
+    """
     try:
-        print(f"Attempting to generate thumbnail for {video_temp_path} at {timestamp_sec}s...")
-        with VideoFileClip(video_temp_path) as clip:
-            # Check if requested time is within video duration
-            if timestamp_sec > clip.duration:
-                print(f"Warning: Requested timestamp {timestamp_sec}s is beyond video duration {clip.duration}s. Using last frame.")
-                timestamp_sec = clip.duration - 0.01 # Use a time slightly before the end
-            if timestamp_sec < 0:
-                 timestamp_sec = 0 # Use first frame if negative
-
-            clip.save_frame(thumb_temp_path, t=timestamp_sec)
-        print(f"Thumbnail successfully generated at {thumb_temp_path}")
-        return True
+        # Construct the command
+        # -ss BEFORE -i is much faster (fast-seek)
+        cmd = [
+            'ffmpeg',
+            '-y',                 # Overwrite output file if it exists
+            '-ss', str(timestamp_sec), 
+            '-i', video_temp_path, 
+            '-vframes', '1',      # Output exactly one frame
+            '-q:v', '2',          # Quality (2-5 is high quality)
+            thumb_temp_path
+        ]
+        
+        # Run the command
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            print(f"Thumbnail successfully generated at {thumb_temp_path}")
+            return True
+        else:
+            print(f"FFmpeg Error output: {result.stderr}")
+            return False
+            
     except Exception as e:
-        # Catch potential moviepy/ffmpeg errors
-        print(f"Error generating thumbnail using moviepy: {e}")
-        print("Ensure FFmpeg is installed and accessible in the environment.")
+        print(f"Direct FFmpeg call failed: {e}")
         return False
-
 
 # --- NEW: Helper Functions for User Data ---
 def load_users_from_azure(blob_service_client):
@@ -290,12 +302,16 @@ def upload_video():
 
     try:
         # --- 1. Prerequisites and Get Form Data ---
+
+        # COMMENT THIS PART FOR LOCAL DEV
         blob_service_client = get_blob_service_client()
         if not blob_service_client:
             return jsonify({"error": "Azure Storage connection not configured"}), 500
 
         if 'videoFile' not in request.files:
             return jsonify({"error": "No video file part in the request"}), 400
+        
+
         file = request.files['videoFile']
         if file.filename == '':
             return jsonify({"error": "No selected video file"}), 400
