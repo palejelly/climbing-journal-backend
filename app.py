@@ -1,5 +1,9 @@
 # app.py
 import os
+from dotenv import load_dotenv  # <--- Import this
+
+load_dotenv()
+
 import json
 import io # Needed for downloading blob content to memory
 import uuid # For generating unique blob names
@@ -269,13 +273,24 @@ def handle_login():
 
 @app.route('/api/videos', methods=['GET'])
 def get_videos():
-    """API endpoint to get the list of all videos from Azure Blob."""
+    print("this is request in get_videos", request.args)
     blob_service_client = get_blob_service_client()
     videos = load_videos_from_azure(blob_service_client)
-    if videos is None: # Check for loading error
+    if videos is None: 
          return jsonify({"error": "Failed to load video metadata"}), 500
-    return jsonify(videos)
 
+    # 1. CHECK FOR QUERY PARAMETER
+    user_id_param = request.args.get('user_id')
+
+    # 2. FILTER IF PARAM EXISTS
+    if user_id_param:
+        # Convert to string for comparison to be safe
+        videos = [v for v in videos if str(v.get('user_id')) == str(user_id_param)]
+
+    # 3. REVERSE ORDER (Newest first, like Instagram)
+    videos.reverse()
+    
+    return jsonify(videos)
 
 @app.route('/api/tags', methods=['GET'])
 def get_tags():
@@ -318,9 +333,11 @@ def upload_video():
 
         title = request.form.get('title', 'Untitled Video')
 
-        # LET's add error handling to the form.
         user_id = request.form.get('user_id')
-        
+        climbed_date = request.form.get('climbed_date')
+        climb_type = request.form.get('climb_type')
+        board_type = request.form.get('board_type')
+
         tags_string = request.form.get('tags', '')
         tags_list = [tag.strip() for tag in tags_string.split(',') if tag.strip()]
 
@@ -390,6 +407,9 @@ def upload_video():
         new_video_entry = {
             "id": next_id,
             "title": title,
+            "climbed_date": climbed_date,
+            "climb_type": climb_type,
+            "board_type": board_type,
             "thumbnail": thumbnail_url, # Use the generated (or placeholder) thumbnail URL
             "videoUrl": video_url,
             "tags": tags_list,
@@ -424,6 +444,50 @@ def upload_video():
             except Exception as e:
                 print(f"Error removing temporary directory {temp_dir}: {e}")
 
+
+# updating video
+@app.route('/api/videos/<int:video_id>', methods=['PUT'])
+def update_video(video_id):
+    data = request.get_json()
+    blob_service_client = get_blob_service_client()
+    videos = load_videos_from_azure(blob_service_client)
+    
+    # Find the video and update fields
+    video = next((v for v in videos if v['id'] == video_id), None)
+    if not video:
+        return jsonify({"error": "Video not found"}), 404
+
+    video['title'] = data.get('title', video['title'])
+    video['tags'] = data.get('tags', video['tags'])
+
+    if save_videos_to_azure(blob_service_client, videos):
+        return jsonify({"message": "Updated successfully", "video": video})
+    return jsonify({"error": "Failed to save changes"}), 500
+
+# deleting video
+@app.route('/api/videos/<int:video_id>', methods=['DELETE'])
+def delete_video(video_id):
+    blob_service_client = get_blob_service_client()
+    videos = load_videos_from_azure(blob_service_client)
+    
+    video = next((v for v in videos if v['id'] == video_id), None)
+    if not video:
+        return jsonify({"error": "Video not found"}), 404
+
+    # 1. (Optional but recommended) Delete actual blobs from Azure
+    try:
+        # Extract blob names from URLs if needed, or just delete if you have them
+        # This prevents "orphan" files taking up space in Azure
+        pass 
+    except Exception as e:
+        print(f"Cleanup error: {e}")
+
+    # 2. Remove from metadata list
+    new_videos = [v for v in videos if v['id'] != video_id]
+    
+    if save_videos_to_azure(blob_service_client, new_videos):
+        return jsonify({"message": "Deleted successfully"})
+    return jsonify({"error": "Failed to delete"}), 500
 
 # --- Route to serve the frontend ---
 # This remains the same, serving index.html from the local 'frontend' folder
