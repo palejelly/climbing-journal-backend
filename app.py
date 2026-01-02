@@ -1,6 +1,10 @@
 # app.py
 import os
+import threading # <---- import to process the video
+import subprocess
+
 from dotenv import load_dotenv  # <--- Import this
+
 
 load_dotenv()
 
@@ -55,6 +59,81 @@ try:
     CORS(app) # Keep CORS enabled
 except:
     pass
+
+def background_video_processing(video_id, input_temp_path, safe_filename):
+    """
+    Handles the heavy lifting in the background: 
+    1. Re-encodes/Scales to 1080p.
+    2. Generates thumbnail.
+    3. Uploads both to Azure.
+    4. Updates videos.json status to 'completed'.
+    """
+    try:
+        blob_service_client = get_blob_service_client()
+        temp_dir = os.path.dirname(input_temp_path)
+        base_name = os.path.splitext(safe_filename)[0]
+        
+        # Paths for processed files
+        processed_video_path = os.path.join(temp_dir, f"{base_name}_1080p.mp4")
+        thumb_temp_path = os.path.join(temp_dir, f"{base_name}_thumb.jpg")
+
+        # 1. SCALE AND RE-ENCODE (FFmpeg)
+        # This fixes mobile compatibility and reduces file size
+        encode_cmd = [
+            'ffmpeg', '-y', '-i', input_temp_path,
+            '-vf', "scale='min(1920,iw)':-2", 
+            '-vcodec', 'libx264', '-crf', '23', '-preset', 'medium',
+            '-acodec', 'aac', '-movflags', 'faststart',
+            processed_video_path
+        ]
+        subprocess.run(encode_cmd, check=True, capture_output=True)
+
+        # 2. GENERATE THUMBNAIL
+        generate_thumbnail(processed_video_path, thumb_temp_path, 1.0)
+
+        # 3. UPLOAD TO AZURE
+        # Upload Processed Video
+        video_blob_name = f"{uuid.uuid4()}.mp4"
+        with open(processed_video_path, 'rb') as v_file:
+            video_url = upload_blob_to_azure(
+                blob_service_client, 
+                AZURE_VIDEO_FILES_CONTAINER_NAME,
+                video_blob_name, 
+                v_file, 
+                'video/mp4' # <--- This MUST be exactly 'video/mp4'
+            )
+            
+        # Upload Thumbnail
+        thumb_blob_name = f"{uuid.uuid4()}.jpg"
+        with open(thumb_temp_path, 'rb') as t_file:
+            thumb_url = upload_blob_to_azure(
+                blob_service_client, AZURE_THUMBNAILS_CONTAINER_NAME,
+                thumb_blob_name, t_file, 'image/jpeg'
+            )
+
+        # 4. UPDATE METADATA STATUS
+        videos_metadata = load_videos_from_azure(blob_service_client)
+        for v in videos_metadata:
+            if v['id'] == video_id:
+                v['videoUrl'] = video_url
+                v['thumbnail'] = thumb_url
+                v['status'] = 'completed' # <--- Mark as ready!
+                break
+        save_videos_to_azure(blob_service_client, videos_metadata)
+
+    except Exception as e:
+        print(f"Background processing failed for video {video_id}: {e}")
+        # Update status to failed so UI can show error
+        videos_metadata = load_videos_from_azure(blob_service_client)
+        for v in videos_metadata:
+            if v['id'] == video_id:
+                v['status'] = 'failed'
+                break
+        save_videos_to_azure(blob_service_client, videos_metadata)
+    finally:
+        # Cleanup temp directory
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
 
 # --- Helper Function ---
 def get_blob_service_client():
@@ -129,7 +208,6 @@ def upload_blob_to_azure(blob_service_client, container_name, blob_name, file_st
         print(f"Error uploading blob '{blob_name}' to container '{container_name}': {e}")
         return None
 
-import subprocess
 
 def generate_thumbnail(video_temp_path, thumb_temp_path, timestamp_sec):
     """
@@ -310,140 +388,53 @@ def get_tags():
 # uploading video
 @app.route('/api/upload', methods=['POST'])
 def upload_video():
-    """API endpoint to upload video, generate thumbnail, and update metadata."""
-    temp_dir = None # Initialize temporary directory path
-    video_temp_path = None
-    thumb_temp_path = None
-
     try:
-        # --- 1. Prerequisites and Get Form Data ---
-
-        # COMMENT THIS PART FOR LOCAL DEV
         blob_service_client = get_blob_service_client()
-        if not blob_service_client:
-            return jsonify({"error": "Azure Storage connection not configured"}), 500
-
-        if 'videoFile' not in request.files:
-            return jsonify({"error": "No video file part in the request"}), 400
-        
-
         file = request.files['videoFile']
-        if file.filename == '':
-            return jsonify({"error": "No selected video file"}), 400
+        
+        # 1. Create Initial Metadata with 'processing' status
+        videos_metadata = load_videos_from_azure(blob_service_client)
+        next_id = max([v.get('id', 0) for v in videos_metadata]) + 1 if videos_metadata else 1
+        
+        new_video_entry = {
+            "id": next_id,
+            "title": request.form.get('title', 'Untitled'),
+            "climbed_date": request.form.get('climbed_date'),
+            "climb_type": request.form.get('climb_type'),
+            "board_type": request.form.get('board_type'),
+            "thumbnail": "https://placehold.co/600x400?text=Processing...", 
+            "videoUrl": None,
+            "tags": [tag.strip() for tag in request.form.get('tags', '').split(',') if tag.strip()],
+            "user_id": request.form.get('user_id'),
+            "status": "processing" # <--- IMPORTANT
+        }
+        
+        # Save placeholder to DB immediately
+        videos_metadata.append(new_video_entry)
+        save_videos_to_azure(blob_service_client, videos_metadata)
 
-        title = request.form.get('title', 'Untitled Video')
-
-        user_id = request.form.get('user_id')
-        climbed_date = request.form.get('climbed_date')
-        climb_type = request.form.get('climb_type')
-        board_type = request.form.get('board_type')
-
-        tags_string = request.form.get('tags', '')
-        tags_list = [tag.strip() for tag in tags_string.split(',') if tag.strip()]
-
-        # --- 2. Save Video Temporarily ---
-        # Create a temporary directory to store files during processing
-        temp_dir = tempfile.mkdtemp(prefix='upload_')
-        print(f"Created temporary directory: {temp_dir}")
-
-        # Sanitize filename slightly (replace spaces, etc.) - more robust sanitization might be needed
+        # 2. Save file to a temp location for the background thread to use
+        temp_dir = tempfile.mkdtemp(prefix='processing_')
         safe_filename = file.filename.replace(" ", "_")
         video_temp_path = os.path.join(temp_dir, safe_filename)
         file.save(video_temp_path)
-        print(f"Video saved temporarily to: {video_temp_path}")
 
-        # --- 3. Generate Thumbnail ---
-        base_name = os.path.splitext(safe_filename)[0]
-        thumb_temp_filename = f"{base_name}{THUMBNAIL_FILENAME_SUFFIX}"
-        thumb_temp_path = os.path.join(temp_dir, thumb_temp_filename)
+        # 3. KICK OFF BACKGROUND THREAD
+        # This returns control to the mobile app INSTANTLY
+        thread = threading.Thread(
+            target=background_video_processing, 
+            args=(next_id, video_temp_path, safe_filename)
+        )
+        thread.start()
 
-        if not generate_thumbnail(video_temp_path, thumb_temp_path, THUMBNAIL_TIME_SECONDS):
-            # If thumbnail generation fails, proceed without it or return error?
-            # For now, let's proceed but log the issue and use a placeholder URL.
-            print("Thumbnail generation failed. Proceeding without custom thumbnail.")
-            thumbnail_url = "https://placehold.co/600x400/fecaca/1f2937?text=Thumb+Error" # Placeholder on error
-            # Optionally, delete the failed (empty?) thumbnail file if it exists
-            if os.path.exists(thumb_temp_path):
-                os.remove(thumb_temp_path)
-            thumb_temp_path = None # Ensure we don't try to upload it later
-        else:
-             # --- 4. Upload Thumbnail ---
-             thumb_blob_name = f"{uuid.uuid4()}{THUMBNAIL_FILENAME_SUFFIX}" # Unique name for blob
-             with open(thumb_temp_path, 'rb') as thumb_file_stream:
-                 thumbnail_url = upload_blob_to_azure(
-                     blob_service_client,
-                     AZURE_THUMBNAILS_CONTAINER_NAME,
-                     thumb_blob_name,
-                     thumb_file_stream,
-                     THUMBNAIL_CONTENT_TYPE
-                 )
-             if not thumbnail_url:
-                 # Handle thumbnail upload failure - maybe use placeholder?
-                 print("Thumbnail upload failed. Using placeholder.")
-                 thumbnail_url = "https://placehold.co/600x400/fbbf24/1f2937?text=Upload+Error"
-
-
-        # --- 5. Upload Original Video File ---
-        video_blob_name = f"{uuid.uuid4()}{os.path.splitext(safe_filename)[1]}" # Unique name
-        video_content_type = file.content_type or 'application/octet-stream'
-        with open(video_temp_path, 'rb') as video_file_stream:
-            video_url = upload_blob_to_azure(
-                blob_service_client,
-                AZURE_VIDEO_FILES_CONTAINER_NAME,
-                video_blob_name,
-                video_file_stream,
-                video_content_type
-            )
-        if not video_url:
-            return jsonify({"error": "Failed to upload video file to Azure Storage"}), 500
-
-
-        # --- 6. Update Metadata ---
-        videos_metadata = load_videos_from_azure(blob_service_client)
-        if videos_metadata is None:
-            return jsonify({"error": "Failed to load existing metadata before update"}), 500
-
-        next_id = max([v.get('id', 0) for v in videos_metadata]) + 1 if videos_metadata else 1
-        new_video_entry = {
-            "id": next_id,
-            "title": title,
-            "climbed_date": climbed_date,
-            "climb_type": climb_type,
-            "board_type": board_type,
-            "thumbnail": thumbnail_url, # Use the generated (or placeholder) thumbnail URL
-            "videoUrl": video_url,
-            "tags": tags_list,
-            "user_id": user_id,
-        }
-        videos_metadata.append(new_video_entry)
-
-        if not save_videos_to_azure(blob_service_client, videos_metadata):
-            # TODO: Consider rolling back blob uploads if metadata save fails
-            return jsonify({"error": "Failed to save updated metadata to Azure Storage"}), 500
-
-        # --- 7. Success Response ---
-        print(f"Successfully processed upload for video ID {next_id}: {title}")
         return jsonify({
-            "message": "Video uploaded and metadata updated successfully!",
-            "newVideo": new_video_entry
-            }), 201
+            "message": "Upload started! Video is being processed.",
+            "video_id": next_id
+        }), 202 # 202 means "Accepted for processing"
 
     except Exception as e:
-        # Catch any unexpected errors during the process
-        print(f"An error occurred during the upload process: {e}")
-        import traceback
-        traceback.print_exc() # Print full traceback for debugging
-        return jsonify({"error": "An internal server error occurred during upload."}), 500
-
-    finally:
-        # --- 8. Cleanup Temporary Files ---
-        if temp_dir and os.path.exists(temp_dir):
-            try:
-                shutil.rmtree(temp_dir) # Remove the directory and all its contents
-                print(f"Successfully removed temporary directory: {temp_dir}")
-            except Exception as e:
-                print(f"Error removing temporary directory {temp_dir}: {e}")
-
+        return jsonify({"error": str(e)}), 500
+    
 
 # updating video
 @app.route('/api/videos/<int:video_id>', methods=['PUT'])
@@ -465,29 +456,62 @@ def update_video(video_id):
     return jsonify({"error": "Failed to save changes"}), 500
 
 # deleting video
+# deleting video
 @app.route('/api/videos/<int:video_id>', methods=['DELETE'])
 def delete_video(video_id):
     blob_service_client = get_blob_service_client()
+    if not blob_service_client:
+        return jsonify({"error": "Azure connection failed"}), 500
+        
     videos = load_videos_from_azure(blob_service_client)
     
+    # Find the video entry to get the URLs
     video = next((v for v in videos if v['id'] == video_id), None)
     if not video:
         return jsonify({"error": "Video not found"}), 404
 
-    # 1. (Optional but recommended) Delete actual blobs from Azure
+    # 1. DELETE ACTUAL BLOBS FROM AZURE
     try:
-        # Extract blob names from URLs if needed, or just delete if you have them
-        # This prevents "orphan" files taking up space in Azure
-        pass 
-    except Exception as e:
-        print(f"Cleanup error: {e}")
+        # Helper to extract filename from URL
+        # URL format: https://account.blob.core.windows.net/container/blobname.mp4
+        def get_blob_name_from_url(url):
+            if not url or not isinstance(url, str): return None
+            return url.split('/')[-1]
 
-    # 2. Remove from metadata list
+        # Delete Video File
+        video_blob_name = get_blob_name_from_url(video.get('videoUrl'))
+        if video_blob_name:
+            video_client = blob_service_client.get_blob_client(
+                container=AZURE_VIDEO_FILES_CONTAINER_NAME, 
+                blob=video_blob_name
+            )
+            video_client.delete_blob()
+            print(f"Deleted video blob: {video_blob_name}")
+
+        # Delete Thumbnail File
+        thumb_blob_name = get_blob_name_from_url(video.get('thumbnail'))
+        # Don't delete if it's the placeholder image
+        if thumb_blob_name and "placehold.co" not in video.get('thumbnail', ''):
+            thumb_client = blob_service_client.get_blob_client(
+                container=AZURE_THUMBNAILS_CONTAINER_NAME, 
+                blob=thumb_blob_name
+            )
+            thumb_client.delete_blob()
+            print(f"Deleted thumbnail blob: {thumb_blob_name}")
+
+    except Exception as e:
+        # We log the error but continue deleting the metadata 
+        # so the UI doesn't get stuck with a "broken" video
+        print(f"Cleanup error (Azure blobs might already be gone): {e}")
+
+    # 2. REMOVE FROM METADATA LIST
     new_videos = [v for v in videos if v['id'] != video_id]
     
     if save_videos_to_azure(blob_service_client, new_videos):
-        return jsonify({"message": "Deleted successfully"})
-    return jsonify({"error": "Failed to delete"}), 500
+        return jsonify({"message": "Deleted successfully from storage and database"})
+    
+    return jsonify({"error": "Failed to update metadata"}), 500
+
 
 # --- Route to serve the frontend ---
 # This remains the same, serving index.html from the local 'frontend' folder
