@@ -102,7 +102,7 @@ def background_video_processing(video_id, input_temp_path, safe_filename):
                 v_file, 
                 'video/mp4' # <--- This MUST be exactly 'video/mp4'
             )
-            
+
         # Upload Thumbnail
         thumb_blob_name = f"{uuid.uuid4()}.jpg"
         with open(thumb_temp_path, 'rb') as t_file:
@@ -404,6 +404,7 @@ def upload_video():
             "board_type": request.form.get('board_type'),
             "thumbnail": "https://placehold.co/600x400?text=Processing...", 
             "videoUrl": None,
+            "grade": request.form.get('grade'),
             "tags": [tag.strip() for tag in request.form.get('tags', '').split(',') if tag.strip()],
             "user_id": request.form.get('user_id'),
             "status": "processing" # <--- IMPORTANT
@@ -455,7 +456,6 @@ def update_video(video_id):
         return jsonify({"message": "Updated successfully", "video": video})
     return jsonify({"error": "Failed to save changes"}), 500
 
-# deleting video
 # deleting video
 @app.route('/api/videos/<int:video_id>', methods=['DELETE'])
 def delete_video(video_id):
