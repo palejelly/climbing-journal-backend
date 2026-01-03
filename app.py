@@ -396,6 +396,12 @@ def upload_video():
         videos_metadata = load_videos_from_azure(blob_service_client)
         next_id = max([v.get('id', 0) for v in videos_metadata]) + 1 if videos_metadata else 1
         
+        raw_grade = request.form.get('grade', '0')
+        try:
+            grade_val = int(raw_grade)
+        except ValueError:
+            grade_val = 0
+
         new_video_entry = {
             "id": next_id,
             "title": request.form.get('title', 'Untitled'),
@@ -404,7 +410,7 @@ def upload_video():
             "board_type": request.form.get('board_type'),
             "thumbnail": "https://placehold.co/600x400?text=Processing...", 
             "videoUrl": None,
-            "grade": request.form.get('grade'),
+            "grade": grade_val,
             "tags": [tag.strip() for tag in request.form.get('tags', '').split(',') if tag.strip()],
             "user_id": request.form.get('user_id'),
             "status": "processing" # <--- IMPORTANT
