@@ -41,6 +41,8 @@ THUMBNAIL_TIME_SECONDS = 5.0 # Time in seconds to grab the frame
 THUMBNAIL_FILENAME_SUFFIX = '_thumb.jpg' # Suffix for thumbnail files
 THUMBNAIL_CONTENT_TYPE = 'image/jpeg'
 
+VIDEO_PROCESSING_TIMEOUT = 300  # 300 seconds (5 minutes)
+
 # Determine the absolute path to the directory this script is in
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 # Define the path to the static frontend files (assuming they are in a 'frontend' subdirectory)
@@ -54,24 +56,22 @@ try:
     from flask_cors import CORS
     from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient, ContentSettings, __version__ as azure_storage_version
     from azure.core.exceptions import ResourceNotFoundError
-    from moviepy import VideoFileClip # Import moviepy
 
     # --- CORS Configuration ---
     CORS(app) # Keep CORS enabled
 except:
     pass
 
+
 def background_video_processing(video_id, input_temp_path, safe_filename):
     """
-    Handles the heavy lifting in the background: 
-    1. Re-encodes/Scales to 1080p.
-    2. Generates thumbnail.
-    3. Uploads both to Azure.
-    4. Updates videos.json status to 'completed'.
+    Handles the heavy lifting in the background with TIMEOUT protection.
     """
+    blob_service_client = get_blob_service_client()
+    # We define temp_dir here so it's available in the finally block
+    temp_dir = os.path.dirname(input_temp_path) 
+    
     try:
-        blob_service_client = get_blob_service_client()
-        temp_dir = os.path.dirname(input_temp_path)
         base_name = os.path.splitext(safe_filename)[0]
         
         # Paths for processed files
@@ -87,7 +87,16 @@ def background_video_processing(video_id, input_temp_path, safe_filename):
             '-acodec', 'aac', '-movflags', 'faststart',
             processed_video_path
         ]
-        subprocess.run(encode_cmd, check=True, capture_output=True)
+        
+        print(f"Starting FFmpeg for video {video_id} with {VIDEO_PROCESSING_TIMEOUT}s timeout...")
+        
+        # --- NEW: Added timeout parameter ---
+        subprocess.run(
+            encode_cmd, 
+            check=True, 
+            capture_output=True, 
+            timeout=VIDEO_PROCESSING_TIMEOUT # <--- Enforces the time limit
+        )
 
         # 2. GENERATE THUMBNAIL
         generate_thumbnail(processed_video_path, thumb_temp_path, 1.0)
@@ -101,7 +110,7 @@ def background_video_processing(video_id, input_temp_path, safe_filename):
                 AZURE_VIDEO_FILES_CONTAINER_NAME,
                 video_blob_name, 
                 v_file, 
-                'video/mp4' # <--- This MUST be exactly 'video/mp4'
+                'video/mp4' 
             )
 
         # Upload Thumbnail
@@ -122,20 +131,33 @@ def background_video_processing(video_id, input_temp_path, safe_filename):
                     v['status'] = 'completed'
                     break
             if save_videos_to_azure(blob_service_client, videos_metadata):
-                break # Success!
+                break 
+
+    # --- NEW: Catch Timeout Specifically ---
+    except subprocess.TimeoutExpired as e:
+        print(f"!!! TIMEOUT: Video {video_id} took longer than {VIDEO_PROCESSING_TIMEOUT} seconds.")
+        # Update status to 'failed' (or you could add a specific 'timeout' status)
+        videos_metadata = load_videos_from_azure(blob_service_client)
+        if videos_metadata:
+            for v in videos_metadata:
+                if v['id'] == video_id:
+                    v['status'] = 'timeout' # Letting the user know it timed out
+                    break
+            save_videos_to_azure(blob_service_client, videos_metadata)
 
     except Exception as e:
         import traceback
         print("--- BACKGROUND PROCESS ERROR ---")
-        traceback.print_exc() # This shows exactly which line failed and why
-        print(f"Details: {e}")        # Update status to failed so UI can show error
+        traceback.print_exc() 
+        print(f"Details: {e}")        
         
         videos_metadata = load_videos_from_azure(blob_service_client)
-        for v in videos_metadata:
-            if v['id'] == video_id:
-                v['status'] = 'failed'
-                break
-        save_videos_to_azure(blob_service_client, videos_metadata)
+        if videos_metadata:
+            for v in videos_metadata:
+                if v['id'] == video_id:
+                    v['status'] = 'failed'
+                    break
+            save_videos_to_azure(blob_service_client, videos_metadata)
     finally:
         # Cleanup temp directory
         if os.path.exists(temp_dir):
@@ -219,7 +241,6 @@ def upload_blob_to_azure(blob_service_client, container_name, blob_name, file_st
 def generate_thumbnail(video_temp_path, thumb_temp_path, timestamp_sec):
     """
     Generates a thumbnail using a direct FFmpeg call to bypass 
-    MoviePy 2.2.1 metadata parsing errors.
     """
     try:
         # Construct the command
@@ -358,7 +379,7 @@ def handle_login():
 
 @app.route('/api/videos', methods=['GET'])
 def get_videos():
-    print("this is request in get_videos", request.args)
+    # print("this is request in get_videos", request.args)
     blob_service_client = get_blob_service_client()
     videos = load_videos_from_azure(blob_service_client)
     if videos is None: 
