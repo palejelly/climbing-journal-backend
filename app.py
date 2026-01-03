@@ -46,8 +46,9 @@ BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 # Define the path to the static frontend files (assuming they are in a 'frontend' subdirectory)
 STATIC_FOLDER = os.path.join(BASE_DIR, 'frontend')
 
-# JUNHO TODO : this part needs to be studied. 
 app = Flask(__name__, static_folder=STATIC_FOLDER, static_url_path='')
+
+video_cache = None  # Global cache variable
 
 try: 
     from flask_cors import CORS
@@ -112,18 +113,23 @@ def background_video_processing(video_id, input_temp_path, safe_filename):
             )
 
         # 4. UPDATE METADATA STATUS
-        videos_metadata = load_videos_from_azure(blob_service_client)
-        for v in videos_metadata:
-            if v['id'] == video_id:
-                v['videoUrl'] = video_url
-                v['thumbnail'] = thumb_url
-                v['status'] = 'completed' # <--- Mark as ready!
-                break
-        save_videos_to_azure(blob_service_client, videos_metadata)
+        for attempt in range(3):
+            videos_metadata = load_videos_from_azure(blob_service_client, force_refresh=True)
+            for v in videos_metadata:
+                if v['id'] == video_id:
+                    v['videoUrl'] = video_url
+                    v['thumbnail'] = thumb_url
+                    v['status'] = 'completed'
+                    break
+            if save_videos_to_azure(blob_service_client, videos_metadata):
+                break # Success!
 
     except Exception as e:
-        print(f"Background processing failed for video {video_id}: {e}")
-        # Update status to failed so UI can show error
+        import traceback
+        print("--- BACKGROUND PROCESS ERROR ---")
+        traceback.print_exc() # This shows exactly which line failed and why
+        print(f"Details: {e}")        # Update status to failed so UI can show error
+        
         videos_metadata = load_videos_from_azure(blob_service_client)
         for v in videos_metadata:
             if v['id'] == video_id:
@@ -147,8 +153,13 @@ def get_blob_service_client():
         print(f"Error creating BlobServiceClient: {e}")
         return None
 
-def load_videos_from_azure(blob_service_client):
-    """Loads video metadata by downloading videos.json from Azure Blob Storage."""
+def load_videos_from_azure(blob_service_client, force_refresh=False):
+    global video_cache
+    
+    # If we have a cache and don't need a refresh, return it instantly
+    if video_cache is not None and not force_refresh:
+        return video_cache
+
     if not blob_service_client:
         return []
 
@@ -156,24 +167,20 @@ def load_videos_from_azure(blob_service_client):
         blob_client = blob_service_client.get_blob_client(
             container=AZURE_METADATA_CONTAINER_NAME, blob=METADATA_BLOB_NAME
         )
-        print(f"Attempting to download blob '{METADATA_BLOB_NAME}' from container '{AZURE_METADATA_CONTAINER_NAME}'...")
         download_stream = blob_client.download_blob()
-        blob_data_bytes = download_stream.readall()
-        blob_data_string = blob_data_bytes.decode('utf-8')
-        print(f"Successfully downloaded metadata blob.")
-        videos = json.loads(blob_data_string)
-        print(f"Successfully parsed JSON data. Found {len(videos)} video entries.")
-        return videos
+        data = json.loads(download_stream.readall().decode('utf-8'))
+        
+        # Update the global cache
+        video_cache = data
+        return video_cache
     
     except ResourceNotFoundError:
-        print(f"Metadata blob '{METADATA_BLOB_NAME}' not found in container '{AZURE_METADATA_CONTAINER_NAME}'. Returning empty list.")
-        return [] # If metadata doesn't exist yet, start fresh
-    except json.JSONDecodeError:
-        print(f"Error: Could not decode JSON from downloaded blob '{METADATA_BLOB_NAME}'.")
-        return None # Indicate error by returning None
+        video_cache = []
+        return []
     except Exception as e:
-        print(f"An unexpected error occurred loading video metadata: {e}")
-        return None # Indicate error
+        print(f"Error loading metadata: {e}")
+        return video_cache if video_cache is not None else []
+    
 
 def save_videos_to_azure(blob_service_client, videos_data):
     """Uploads the updated video metadata list back to videos.json in Azure Blob Storage."""
@@ -462,61 +469,44 @@ def update_video(video_id):
         return jsonify({"message": "Updated successfully", "video": video})
     return jsonify({"error": "Failed to save changes"}), 500
 
+
 # deleting video
 @app.route('/api/videos/<int:video_id>', methods=['DELETE'])
 def delete_video(video_id):
     blob_service_client = get_blob_service_client()
-    if not blob_service_client:
-        return jsonify({"error": "Azure connection failed"}), 500
-        
     videos = load_videos_from_azure(blob_service_client)
     
-    # Find the video entry to get the URLs
     video = next((v for v in videos if v['id'] == video_id), None)
     if not video:
         return jsonify({"error": "Video not found"}), 404
 
-    # 1. DELETE ACTUAL BLOBS FROM AZURE
     try:
-        # Helper to extract filename from URL
-        # URL format: https://account.blob.core.windows.net/container/blobname.mp4
         def get_blob_name_from_url(url):
-            if not url or not isinstance(url, str): return None
+            if not url or not isinstance(url, str) or "placehold.co" in url: 
+                return None
             return url.split('/')[-1]
 
-        # Delete Video File
-        video_blob_name = get_blob_name_from_url(video.get('videoUrl'))
-        if video_blob_name:
-            video_client = blob_service_client.get_blob_client(
-                container=AZURE_VIDEO_FILES_CONTAINER_NAME, 
-                blob=video_blob_name
-            )
-            video_client.delete_blob()
-            print(f"Deleted video blob: {video_blob_name}")
+        # Delete Video (if it exists)
+        v_name = get_blob_name_from_url(video.get('videoUrl'))
+        if v_name:
+            blob_service_client.get_blob_client(AZURE_VIDEO_FILES_CONTAINER_NAME, v_name).delete_blob()
 
-        # Delete Thumbnail File
-        thumb_blob_name = get_blob_name_from_url(video.get('thumbnail'))
-        # Don't delete if it's the placeholder image
-        if thumb_blob_name and "placehold.co" not in video.get('thumbnail', ''):
-            thumb_client = blob_service_client.get_blob_client(
-                container=AZURE_THUMBNAILS_CONTAINER_NAME, 
-                blob=thumb_blob_name
-            )
-            thumb_client.delete_blob()
-            print(f"Deleted thumbnail blob: {thumb_blob_name}")
-
+        # Delete Thumbnail (if it exists)
+        t_name = get_blob_name_from_url(video.get('thumbnail'))
+        if t_name:
+            blob_service_client.get_blob_client(AZURE_THUMBNAILS_CONTAINER_NAME, t_name).delete_blob()
+            
     except Exception as e:
-        # We log the error but continue deleting the metadata 
-        # so the UI doesn't get stuck with a "broken" video
-        print(f"Cleanup error (Azure blobs might already be gone): {e}")
+        print(f"Cleanup skipped or failed: {e}")
 
-    # 2. REMOVE FROM METADATA LIST
+    # Remove from metadata
     new_videos = [v for v in videos if v['id'] != video_id]
     
     if save_videos_to_azure(blob_service_client, new_videos):
-        return jsonify({"message": "Deleted successfully from storage and database"})
-    
-    return jsonify({"error": "Failed to update metadata"}), 500
+        # IMPORTANT: Force a cache refresh so the UI sees the change immediately
+        load_videos_from_azure(blob_service_client, force_refresh=True)
+        return jsonify({"message": "Deleted successfully"})
+    return jsonify({"error": "Failed to delete"}), 500
 
 
 # --- Route to serve the frontend ---
