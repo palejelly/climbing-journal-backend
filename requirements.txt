@@ -4,3 +4,4 @@ azure-storage-blob
 gunicorn # For production deployment on App Service
 moviepy
 werkzeug
+psycopg2-binary

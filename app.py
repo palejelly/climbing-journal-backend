@@ -19,21 +19,23 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 # --- Configuration ---
 # Load Azure Storage connection string from environment variable
-# IMPORTANT: Set this environment variable in your development and deployment environments.
+
+
 AZURE_CONNECTION_STRING = os.environ.get('AZURE_STORAGE_CONNECTION_STRING')
 # this is connection string for azure storage account. 
-
-# Define the container name where videos.json is stored
-AZURE_METADATA_CONTAINER_NAME = os.environ.get('AZURE_METADATA_CONTAINER_NAME', 'climbing-journal-storage') # Default to 'videodata' if not set
-# Define the name of the metadata blob
-
-# Define the container name where actual video files will be uploaded
 AZURE_VIDEO_FILES_CONTAINER_NAME = os.environ.get('AZURE_VIDEO_FILES_CONTAINER_NAME', 'climbing-journal-videos') # Default 'videos'
 AZURE_THUMBNAILS_CONTAINER_NAME = os.environ.get('AZURE_THUMBNAILS_CONTAINER_NAME', 'climbing-journal-thumbnails')
 
 
-METADATA_BLOB_NAME = 'videos.json'
-USER_METADATA_BLOB_NAME = 'users.json'
+
+# Use your connection details
+DB_CONFIG = {
+    "host": os.environ.get('SECRET_PGHOST'),
+    "user": os.environ.get('SECRET_PGUSER'),
+    "password": os.environ.get('SECRET_PGPASSWORD'), 
+    "dbname": os.environ.get('SECRET_PGDATABASE'),
+    "port": int(os.environ.get('SECRET_PGPORT',5432)),
+}
 
 
 # NEW: Thumbnail generation settings
@@ -63,106 +65,147 @@ except:
     pass
 
 
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+
+def get_db_connection():
+    try:
+        conn = psycopg2.connect(**DB_CONFIG, sslmode='require')
+        return conn
+    except Exception as e:
+        print(f"Database connection error: {e}", flush=True)
+        return None
+
+
+def init_db():
+    conn = get_db_connection()
+    if not conn: return
+    cur = conn.cursor()
+    # Using TEXT[] for tags allows us to use Postgres' powerful array searching
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS public.videos (
+            id SERIAL PRIMARY KEY,
+            title TEXT NOT NULL,
+            climbed_date DATE,
+            grade INTEGER,
+            climb_type TEXT,
+            board_type TEXT,
+            thumbnail TEXT,
+            video_url TEXT,
+            tags TEXT[],
+            user_id TEXT,
+            status TEXT DEFAULT 'processing'
+        );
+    ''')
+    conn.commit()
+    cur.close()
+    conn.close()
+    return
+
+# Run this once when the app starts
+init_db()
+
+
 def background_video_processing(video_id, input_temp_path, safe_filename):
     """
-    Handles the heavy lifting in the background with TIMEOUT protection.
+    1. Re-encodes video to 1080p 8-bit.
+    2. Generates thumbnail.
+    3. Uploads both to Azure.
+    4. Updates PostgreSQL row from 'processing' to 'completed'.
     """
-    blob_service_client = get_blob_service_client()
-    # We define temp_dir here so it's available in the finally block
-    temp_dir = os.path.dirname(input_temp_path) 
+    # Initialize variables for cleanup
+    temp_dir = os.path.dirname(input_temp_path)
     
     try:
+        print(f"--- Starting background processing for Video ID: {video_id} ---", flush=True)
+        blob_service_client = get_blob_service_client()
         base_name = os.path.splitext(safe_filename)[0]
         
-        # Paths for processed files
+        # Define paths for processed files
         processed_video_path = os.path.join(temp_dir, f"{base_name}_1080p.mp4")
         thumb_temp_path = os.path.join(temp_dir, f"{base_name}_thumb.jpg")
 
-        # 1. SCALE AND RE-ENCODE (FFmpeg)
-        # This fixes mobile compatibility and reduces file size
+        # 1. FFmpeg: SCALE AND RE-ENCODE
+        # Forces 8-bit (yuv420p) and scales to 1080p max width
+        print(f"[{video_id}] Running FFmpeg encoding...", flush=True)
         encode_cmd = [
             'ffmpeg', '-y', '-i', input_temp_path,
-            '-vf', "scale='min(1920,iw)':-2", 
+            '-vf', "scale='min(1920,iw)':-2,format=yuv420p", 
             '-vcodec', 'libx264', '-crf', '23', '-preset', 'medium',
             '-acodec', 'aac', '-movflags', 'faststart',
             processed_video_path
         ]
+        result = subprocess.run(encode_cmd, capture_output=True, text=True)
         
-        print(f"Starting FFmpeg for video {video_id} with {VIDEO_PROCESSING_TIMEOUT}s timeout...")
-        
-        # --- NEW: Added timeout parameter ---
-        subprocess.run(
-            encode_cmd, 
-            check=True, 
-            capture_output=True, 
-            timeout=VIDEO_PROCESSING_TIMEOUT # <--- Enforces the time limit
-        )
+        if result.returncode != 0:
+            raise Exception(f"FFmpeg encoding failed: {result.stderr}")
 
         # 2. GENERATE THUMBNAIL
-        generate_thumbnail(processed_video_path, thumb_temp_path, 1.0)
+        print(f"[{video_id}] Generating thumbnail...", flush=True)
+        thumb_success = generate_thumbnail(processed_video_path, thumb_temp_path, 1.0)
+        if not thumb_success:
+            print(f"[{video_id}] Warning: Thumbnail generation failed, using placeholder.", flush=True)
 
         # 3. UPLOAD TO AZURE
-        # Upload Processed Video
+        # Upload Video
         video_blob_name = f"{uuid.uuid4()}.mp4"
+        print(f"[{video_id}] Uploading video to Azure...", flush=True)
         with open(processed_video_path, 'rb') as v_file:
             video_url = upload_blob_to_azure(
-                blob_service_client, 
-                AZURE_VIDEO_FILES_CONTAINER_NAME,
-                video_blob_name, 
-                v_file, 
-                'video/mp4' 
+                blob_service_client, AZURE_VIDEO_FILES_CONTAINER_NAME,
+                video_blob_name, v_file, 'video/mp4'
             )
 
-        # Upload Thumbnail
-        thumb_blob_name = f"{uuid.uuid4()}.jpg"
-        with open(thumb_temp_path, 'rb') as t_file:
-            thumb_url = upload_blob_to_azure(
-                blob_service_client, AZURE_THUMBNAILS_CONTAINER_NAME,
-                thumb_blob_name, t_file, 'image/jpeg'
-            )
+        # Upload Thumbnail (if generated)
+        thumb_url = "https://placehold.co/600x400?text=No+Thumb"
+        if os.path.exists(thumb_temp_path):
+            print(f"[{video_id}] Uploading thumbnail to Azure...", flush=True)
+            thumb_blob_name = f"{uuid.uuid4()}.jpg"
+            with open(thumb_temp_path, 'rb') as t_file:
+                uploaded_thumb_url = upload_blob_to_azure(
+                    blob_service_client, AZURE_THUMBNAILS_CONTAINER_NAME,
+                    thumb_blob_name, t_file, 'image/jpeg'
+                )
+                if uploaded_thumb_url:
+                    thumb_url = uploaded_thumb_url
 
-        # 4. UPDATE METADATA STATUS
-        for attempt in range(3):
-            videos_metadata = load_videos_from_azure(blob_service_client, force_refresh=True)
-            for v in videos_metadata:
-                if v['id'] == video_id:
-                    v['videoUrl'] = video_url
-                    v['thumbnail'] = thumb_url
-                    v['status'] = 'completed'
-                    break
-            if save_videos_to_azure(blob_service_client, videos_metadata):
-                break 
-
-    # --- NEW: Catch Timeout Specifically ---
-    except subprocess.TimeoutExpired as e:
-        print(f"!!! TIMEOUT: Video {video_id} took longer than {VIDEO_PROCESSING_TIMEOUT} seconds.")
-        # Update status to 'failed' (or you could add a specific 'timeout' status)
-        videos_metadata = load_videos_from_azure(blob_service_client)
-        if videos_metadata:
-            for v in videos_metadata:
-                if v['id'] == video_id:
-                    v['status'] = 'timeout' # Letting the user know it timed out
-                    break
-            save_videos_to_azure(blob_service_client, videos_metadata)
+        # 4. UPDATE POSTGRESQL STATUS
+        print(f"[{video_id}] Updating database status to 'completed'...", flush=True)
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('''
+            UPDATE videos 
+            SET video_url = %s, thumbnail = %s, status = 'completed'
+            WHERE id = %s
+        ''', (video_url, thumb_url, video_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        print(f"--- Successfully processed Video ID: {video_id} ---", flush=True)
 
     except Exception as e:
-        import traceback
-        print("--- BACKGROUND PROCESS ERROR ---")
-        traceback.print_exc() 
-        print(f"Details: {e}")        
+        print(f"!!! FATAL ERROR for Video ID {video_id}: {str(e)} !!!", flush=True)
         
-        videos_metadata = load_videos_from_azure(blob_service_client)
-        if videos_metadata:
-            for v in videos_metadata:
-                if v['id'] == video_id:
-                    v['status'] = 'failed'
-                    break
-            save_videos_to_azure(blob_service_client, videos_metadata)
+        # Update DB to 'failed' so user knows it's stuck
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("UPDATE videos SET status = 'failed' WHERE id = %s", (video_id,))
+            conn.commit()
+            cur.close()
+            conn.close()
+        except Exception as db_err:
+            print(f"Could not update status to failed: {db_err}", flush=True)
+
     finally:
-        # Cleanup temp directory
+        # 5. CLEANUP TEMP FILES
         if os.path.exists(temp_dir):
+            print(f"[{video_id}] Cleaning up temp directory: {temp_dir}", flush=True)
             shutil.rmtree(temp_dir)
 
+            
 # --- Helper Function ---
 def get_blob_service_client():
     """Creates and returns a BlobServiceClient if connection string is available."""
@@ -175,54 +218,45 @@ def get_blob_service_client():
         print(f"Error creating BlobServiceClient: {e}")
         return None
 
-def load_videos_from_azure(blob_service_client, force_refresh=False):
-    global video_cache
-    
-    # If we have a cache and don't need a refresh, return it instantly
-    if video_cache is not None and not force_refresh:
-        return video_cache
 
-    if not blob_service_client:
+def get_videos_from_db(user_id=None):
+    """
+    Fetches videos from PostgreSQL. 
+    If user_id is provided, it filters for that user.
+    """
+    conn = get_db_connection()
+    if not conn:
         return []
-
-    try:
-        blob_client = blob_service_client.get_blob_client(
-            container=AZURE_METADATA_CONTAINER_NAME, blob=METADATA_BLOB_NAME
-        )
-        download_stream = blob_client.download_blob()
-        data = json.loads(download_stream.readall().decode('utf-8'))
         
-        # Update the global cache
-        video_cache = data
-        return video_cache
-    
-    except ResourceNotFoundError:
-        video_cache = []
-        return []
-    except Exception as e:
-        print(f"Error loading metadata: {e}")
-        return video_cache if video_cache is not None else []
-    
-
-def save_videos_to_azure(blob_service_client, videos_data):
-    """Uploads the updated video metadata list back to videos.json in Azure Blob Storage."""
-    if not blob_service_client:
-        return False
-
     try:
-        blob_client = blob_service_client.get_blob_client(
-            container=AZURE_METADATA_CONTAINER_NAME, blob=METADATA_BLOB_NAME
-        )
-        # Convert Python list back to JSON string
-        updated_json_data = json.dumps(videos_data, indent=2) # Use indent for readability
-        # Upload the JSON string, overwriting the existing blob
-        blob_client.upload_blob(updated_json_data.encode('utf-8'), overwrite=True,
-                                content_settings=ContentSettings(content_type='application/json'))
-        print(f"Successfully uploaded updated metadata to blob '{METADATA_BLOB_NAME}'.")
-        return True
+        # RealDictCursor makes the result look like your old JSON (a list of dictionaries)
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        if user_id:
+            # Filtered view (Profile)
+            query = "SELECT * FROM videos WHERE user_id = %s ORDER BY id DESC"
+            cur.execute(query, (str(user_id),))
+        else:
+            # Global view (Feed)
+            query = "SELECT * FROM videos ORDER BY id DESC"
+            cur.execute(query)
+            
+        videos = cur.fetchall()
+        cur.close()
+        
+        # PostgreSQL returns 'datetime' objects for dates, 
+        # but JSON needs strings. We convert them here.
+        for v in videos:
+            if v['climbed_date']:
+                v['climbed_date'] = v['climbed_date'].isoformat()
+                
+        return videos
     except Exception as e:
-        print(f"An unexpected error occurred saving video metadata: {e}")
-        return False
+        print(f"Error fetching from DB: {e}", flush=True)
+        return []
+    finally:
+        conn.close()
+
 
 def upload_blob_to_azure(blob_service_client, container_name, blob_name, file_stream, content_type):
     """Uploads a file stream to a specified blob."""
@@ -269,265 +303,190 @@ def generate_thumbnail(video_temp_path, thumb_temp_path, timestamp_sec):
         print(f"Direct FFmpeg call failed: {e}")
         return False
 
-# --- NEW: Helper Functions for User Data ---
-def load_users_from_azure(blob_service_client):
-    """Loads user data from users.json in Azure Blob Storage."""
-    if not blob_service_client: return []
-    try:
-        blob_client = blob_service_client.get_blob_client(
-            container=AZURE_METADATA_CONTAINER_NAME, blob=USER_METADATA_BLOB_NAME
-        )
-        print(f"Attempting to download blob '{USER_METADATA_BLOB_NAME}' from container '{AZURE_METADATA_CONTAINER_NAME}'...")
-        download_stream = blob_client.download_blob()
-        users = json.loads(download_stream.readall())
-        print(f"Successfully downloaded and parsed user data.")
-        return users
-    except ResourceNotFoundError:
-        print(f"User data blob '{USER_METADATA_BLOB_NAME}' not found. Starting with an empty list.")
-        return [] # If no users file exists, start with an empty list
-    except Exception as e:
-        print(f"An error occurred loading user data: {e}")
-        return None # Indicate error
-
-def save_users_to_azure(blob_service_client, users_data):
-    """Uploads the updated user list back to users.json in Azure Blob Storage."""
-    if not blob_service_client: return False
-    try:
-        blob_client = blob_service_client.get_blob_client(
-            container=AZURE_METADATA_CONTAINER_NAME, blob=USER_METADATA_BLOB_NAME
-        )
-        updated_json_data = json.dumps(users_data, indent=2)
-        blob_client.upload_blob(updated_json_data.encode('utf-8'), overwrite=True,
-                                content_settings=ContentSettings(content_type='application/json'))
-        print(f"Successfully uploaded updated user data to blob '{USER_METADATA_BLOB_NAME}'.")
-        return True
-    except Exception as e:
-        print(f"An error occurred saving user data: {e}")
-        return False
-
 
 # --- API Routes ---
-
-@app.route('/auth/join', methods=['POST'])
-def handle_join():
-    """API endpoint for user registration (signing up)."""
-    data = request.get_json()
-    if not data or not data.get('username') or not data.get('password'):
-        return jsonify({"error": "Username and password are required"}), 400
-
-    username = data['username']
-    password = data['password']
-
-    blob_service_client = get_blob_service_client()
-    if not blob_service_client:
-        return jsonify({"error": "Azure Storage connection not configured"}), 500
-
-    users = load_users_from_azure(blob_service_client)
-    if users is None:
-        return jsonify({"error": "Failed to load user data"}), 500
-
-    # Check if username already exists
-    if any(user['username'] == username for user in users):
-        return jsonify({"error": "Username already exists"}), 409 # 409 Conflict
-
-    # Hash the password for secure storage
-    hashed_password = generate_password_hash(password)
-
-    # Add new user
-    new_user = {"username": username, "password": hashed_password}
-    users.append(new_user)
-
-    # Save updated user list back to Azure
-    if not save_users_to_azure(blob_service_client, users):
-        return jsonify({"error": "Failed to save new user data"}), 500
-
-    return jsonify({"message": f"User '{username}' created successfully"}), 201
-
-
-@app.route('/auth/login', methods=['POST'])
-def handle_login():
-
-    # need to update join/login to sql server.
-    """API endpoint for user authentication (signing in)."""
-    data = request.get_json()
-    if not data or not data.get('username') or not data.get('password'):
-        return jsonify({"error": "Username and password are required"}), 400
-
-    username = data['username']
-    password = data['password']
-
-    blob_service_client = get_blob_service_client()
-    if not blob_service_client:
-        return jsonify({"error": "Azure Storage connection not configured"}), 500
-
-    users = load_users_from_azure(blob_service_client)
-    if users is None:
-        return jsonify({"error": "Failed to load user data"}), 500
-
-    # Find the user
-    user = next((user for user in users if user['username'] == username), None)
-
-    # Check if user exists and if the password is correct
-    if user and check_password_hash(user['password'], password):
-        # In a real app, you would generate and return a JWT (JSON Web Token) here.
-        # For simplicity, we'll just return a success message.
-        return jsonify({"message": f"Login successful for user '{username}'"}), 200
-    else:
-        return jsonify({"error": "Invalid username or password"}), 401 # 401 Unauthorized
-
 
 
 @app.route('/api/videos', methods=['GET'])
 def get_videos():
-    # print("this is request in get_videos", request.args)
-    blob_service_client = get_blob_service_client()
-    videos = load_videos_from_azure(blob_service_client)
-    if videos is None: 
-         return jsonify({"error": "Failed to load video metadata"}), 500
-
-    # 1. CHECK FOR QUERY PARAMETER
     user_id_param = request.args.get('user_id')
-
-    # 2. FILTER IF PARAM EXISTS
-    if user_id_param:
-        # Convert to string for comparison to be safe
-        videos = [v for v in videos if str(v.get('user_id')) == str(user_id_param)]
-
-    # 3. REVERSE ORDER (Newest first, like Instagram)
-    videos.reverse()
     
+    # Use the new DB function instead of the old JSON loader
+    videos = get_videos_from_db(user_id_param)
+    
+    if videos is None: 
+         return jsonify({"error": "Failed to load videos"}), 500
+
+    # Note: We don't need .reverse() anymore because 
+    # the SQL query uses "ORDER BY id DESC"
     return jsonify(videos)
+
 
 @app.route('/api/tags', methods=['GET'])
 def get_tags():
-    """API endpoint to get a list of unique tags from Azure Blob data."""
-    blob_service_client = get_blob_service_client()
-    videos = load_videos_from_azure(blob_service_client)
-    if videos is None: return jsonify({"error": "Failed to load video metadata"}), 500
-    all_tags = set()
+    conn = get_db_connection()
+    if not conn: return jsonify([])
+    
+    try:
+        cur = conn.cursor()
+        # This special Postgres syntax expands the tags array and finds unique values
+        cur.execute("SELECT DISTINCT unnest(tags) FROM videos WHERE tags IS NOT NULL ORDER BY 1")
+        tags = [row[0] for row in cur.fetchall()]
+        cur.close()
+        return jsonify(tags)
+    except Exception as e:
+        print(f"Error fetching tags: {e}")
+        return jsonify([])
+    finally:
+        conn.close()
 
-    if isinstance(videos, list):
-        for video in videos:
-            if isinstance(video.get('tags'), list):
-                 for tag in video['tags']:
-                     if isinstance(tag, str): all_tags.add(tag)
-    return jsonify(sorted(list(all_tags)))
 
 # uploading video
 @app.route('/api/upload', methods=['POST'])
 def upload_video():
     try:
-        blob_service_client = get_blob_service_client()
-        file = request.files['videoFile']
+        # 1. Collect form data
+        title = request.form.get('title', 'Untitled')
+        climbed_date = request.form.get('climbed_date')
+        climb_type = request.form.get('climb_type')
+        board_type = request.form.get('board_type')
+        user_id = request.form.get('user_id')
         
-        # 1. Create Initial Metadata with 'processing' status
-        videos_metadata = load_videos_from_azure(blob_service_client)
-        next_id = max([v.get('id', 0) for v in videos_metadata]) + 1 if videos_metadata else 1
-        
-        raw_grade = request.form.get('grade', '0')
+        # Handle Grade safely
         try:
-            grade_val = int(raw_grade)
-        except ValueError:
-            grade_val = 0
+            grade = int(request.form.get('grade', 0))
+        except (ValueError, TypeError):
+            grade = 0
+            
+        # Handle Tags (Convert comma-string to Python list)
+        tags_raw = request.form.get('tags', '')
+        tags_list = [t.strip() for t in tags_raw.split(',') if t.strip()]
 
-        new_video_entry = {
-            "id": next_id,
-            "title": request.form.get('title', 'Untitled'),
-            "climbed_date": request.form.get('climbed_date'),
-            "climb_type": request.form.get('climb_type'),
-            "board_type": request.form.get('board_type'),
-            "thumbnail": "https://placehold.co/600x400?text=Processing...", 
-            "videoUrl": None,
-            "grade": grade_val,
-            "tags": [tag.strip() for tag in request.form.get('tags', '').split(',') if tag.strip()],
-            "user_id": request.form.get('user_id'),
-            "status": "processing" # <--- IMPORTANT
-        }
+        # 2. Insert into PostgreSQL with 'processing' status
+        conn = get_db_connection()
+        cur = conn.cursor()
         
-        # Save placeholder to DB immediately
-        videos_metadata.append(new_video_entry)
-        save_videos_to_azure(blob_service_client, videos_metadata)
+        # We use RETURNING id so we know which row to update in the background thread
+        cur.execute('''
+            INSERT INTO videos (title, climbed_date, grade, climb_type, board_type, tags, user_id, status, thumbnail)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        ''', (
+            title, climbed_date, grade, climb_type, board_type, 
+            tags_list, user_id, 'processing', 
+            "https://placehold.co/600x400?text=Processing..."
+        ))
+        
+        new_video_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        conn.close()
 
-        # 2. Save file to a temp location for the background thread to use
+        # 3. Handle the File
+        file = request.files['videoFile']
         temp_dir = tempfile.mkdtemp(prefix='processing_')
         safe_filename = file.filename.replace(" ", "_")
         video_temp_path = os.path.join(temp_dir, safe_filename)
         file.save(video_temp_path)
 
-        # 3. KICK OFF BACKGROUND THREAD
-        # This returns control to the mobile app INSTANTLY
+        # 4. Start Background Thread
         thread = threading.Thread(
             target=background_video_processing, 
-            args=(next_id, video_temp_path, safe_filename)
+            args=(new_video_id, video_temp_path, safe_filename)
         )
         thread.start()
 
         return jsonify({
             "message": "Upload started! Video is being processed.",
-            "video_id": next_id
-        }), 202 # 202 means "Accepted for processing"
+            "video_id": new_video_id
+        }), 202
 
     except Exception as e:
+        print(f"Upload error: {e}", flush=True)
         return jsonify({"error": str(e)}), 500
-    
+        
 
 # updating video
 @app.route('/api/videos/<int:video_id>', methods=['PUT'])
 def update_video(video_id):
     data = request.get_json()
-    blob_service_client = get_blob_service_client()
-    videos = load_videos_from_azure(blob_service_client)
-    
-    # Find the video and update fields
-    video = next((v for v in videos if v['id'] == video_id), None)
-    if not video:
-        return jsonify({"error": "Video not found"}), 404
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
 
-    video['title'] = data.get('title', video['title'])
-    video['tags'] = data.get('tags', video['tags'])
+    # Extract fields from request
+    title = data.get('title')
+    # If tags come in as a string, split them; if they are already a list, use as is.
+    tags = data.get('tags')
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(',') if t.strip()]
 
-    if save_videos_to_azure(blob_service_client, videos):
-        return jsonify({"message": "Updated successfully", "video": video})
-    return jsonify({"error": "Failed to save changes"}), 500
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "Database connection failed"}), 500
 
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # 1. Update the record in PostgreSQL
+        # We use COALESCE to keep the old value if the new one isn't provided
+        cur.execute('''
+            UPDATE videos 
+            SET title = COALESCE(%s, title), 
+                tags = COALESCE(%s, tags)
+            WHERE id = %s
+            RETURNING *
+        ''', (title, tags, video_id))
+        
+        updated_video = cur.fetchone()
+        conn.commit()
+        
+        if not updated_video:
+            return jsonify({"error": "Video not found"}), 404
+
+        print(f"Successfully updated Video ID: {video_id}", flush=True)
+        return jsonify({
+            "message": "Updated successfully", 
+            "video": updated_video
+        })
+
+    except Exception as e:
+        print(f"Error updating video {video_id}: {e}", flush=True)
+        return jsonify({"error": "Failed to save changes"}), 500
+    finally:
+        cur.close()
+        conn.close()
 
 # deleting video
 @app.route('/api/videos/<int:video_id>', methods=['DELETE'])
 def delete_video(video_id):
-    blob_service_client = get_blob_service_client()
-    videos = load_videos_from_azure(blob_service_client)
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
     
-    video = next((v for v in videos if v['id'] == video_id), None)
+    # 1. Get info to delete blobs
+    cur.execute("SELECT video_url, thumbnail FROM videos WHERE id = %s", (video_id,))
+    video = cur.fetchone()
+    
     if not video:
-        return jsonify({"error": "Video not found"}), 404
+        return jsonify({"error": "Not found"}), 404
 
+    # 2. Azure Cleanup Logic
     try:
-        def get_blob_name_from_url(url):
-            if not url or not isinstance(url, str) or "placehold.co" in url: 
-                return None
-            return url.split('/')[-1]
-
-        # Delete Video (if it exists)
-        v_name = get_blob_name_from_url(video.get('videoUrl'))
-        if v_name:
-            blob_service_client.get_blob_client(AZURE_VIDEO_FILES_CONTAINER_NAME, v_name).delete_blob()
-
-        # Delete Thumbnail (if it exists)
-        t_name = get_blob_name_from_url(video.get('thumbnail'))
-        if t_name:
-            blob_service_client.get_blob_client(AZURE_THUMBNAILS_CONTAINER_NAME, t_name).delete_blob()
-            
+        blob_service_client = get_blob_service_client()
+        for key in ['video_url', 'thumbnail']:
+            url = video.get(key)
+            if url and "placehold.co" not in url:
+                blob_name = url.split('/')[-1]
+                container = AZURE_VIDEO_FILES_CONTAINER_NAME if key == 'video_url' else AZURE_THUMBNAILS_CONTAINER_NAME
+                blob_service_client.get_blob_client(container, blob_name).delete_blob()
     except Exception as e:
-        print(f"Cleanup skipped or failed: {e}")
+        print(f"Blob deletion error: {e}")
 
-    # Remove from metadata
-    new_videos = [v for v in videos if v['id'] != video_id]
-    
-    if save_videos_to_azure(blob_service_client, new_videos):
-        # IMPORTANT: Force a cache refresh so the UI sees the change immediately
-        load_videos_from_azure(blob_service_client, force_refresh=True)
-        return jsonify({"message": "Deleted successfully"})
-    return jsonify({"error": "Failed to delete"}), 500
+    # 3. DB Cleanup
+    cur.execute("DELETE FROM videos WHERE id = %s", (video_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"message": "Deleted successfully"})
 
 
 # --- Route to serve the frontend ---
