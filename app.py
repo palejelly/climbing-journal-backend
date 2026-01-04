@@ -1,11 +1,9 @@
 # app.py
 import os
-import threading # <---- import to process the video
+import threading 
 import subprocess
 
 from dotenv import load_dotenv  # <--- Import this
-
-
 load_dotenv()
 
 import json
@@ -20,15 +18,12 @@ from werkzeug.security import generate_password_hash, check_password_hash
 # --- Configuration ---
 # Load Azure Storage connection string from environment variable
 
-
 AZURE_CONNECTION_STRING = os.environ.get('AZURE_STORAGE_CONNECTION_STRING')
-# this is connection string for azure storage account. 
-AZURE_VIDEO_FILES_CONTAINER_NAME = os.environ.get('AZURE_VIDEO_FILES_CONTAINER_NAME', 'climbing-journal-videos') # Default 'videos'
+AZURE_VIDEO_FILES_CONTAINER_NAME = os.environ.get('AZURE_VIDEO_FILES_CONTAINER_NAME', 'climbing-journal-videos') 
 AZURE_THUMBNAILS_CONTAINER_NAME = os.environ.get('AZURE_THUMBNAILS_CONTAINER_NAME', 'climbing-journal-thumbnails')
 
 
-
-# Use your connection details
+# Load Azure PostgreSQL connection string from environment variable
 DB_CONFIG = {
     "host": os.environ.get('SECRET_PGHOST'),
     "user": os.environ.get('SECRET_PGUSER'),
@@ -38,7 +33,7 @@ DB_CONFIG = {
 }
 
 
-# NEW: Thumbnail generation settings
+# Thumbnail generation settings
 THUMBNAIL_TIME_SECONDS = 5.0 # Time in seconds to grab the frame
 THUMBNAIL_FILENAME_SUFFIX = '_thumb.jpg' # Suffix for thumbnail files
 THUMBNAIL_CONTENT_TYPE = 'image/jpeg'
@@ -95,6 +90,7 @@ def init_db():
             video_url TEXT,
             tags TEXT[],
             user_id TEXT,
+            user_name TEXT,
             status TEXT DEFAULT 'processing'
         );
     ''')
@@ -108,13 +104,6 @@ init_db()
 
 
 def background_video_processing(video_id, input_temp_path, safe_filename):
-    """
-    1. Re-encodes video to 1080p 8-bit.
-    2. Generates thumbnail.
-    3. Uploads both to Azure.
-    4. Updates PostgreSQL row from 'processing' to 'completed'.
-    """
-    # Initialize variables for cleanup
     temp_dir = os.path.dirname(input_temp_path)
     
     try:
@@ -122,13 +111,11 @@ def background_video_processing(video_id, input_temp_path, safe_filename):
         blob_service_client = get_blob_service_client()
         base_name = os.path.splitext(safe_filename)[0]
         
-        # Define paths for processed files
         processed_video_path = os.path.join(temp_dir, f"{base_name}_1080p.mp4")
         thumb_temp_path = os.path.join(temp_dir, f"{base_name}_thumb.jpg")
 
-        # 1. FFmpeg: SCALE AND RE-ENCODE
-        # Forces 8-bit (yuv420p) and scales to 1080p max width
-        print(f"[{video_id}] Running FFmpeg encoding...", flush=True)
+        # 1. FFmpeg: SCALE AND RE-ENCODE WITH TIMEOUT
+        print(f"[{video_id}] Running FFmpeg encoding (Timeout: {VIDEO_PROCESSING_TIMEOUT}s)...", flush=True)
         encode_cmd = [
             'ffmpeg', '-y', '-i', input_temp_path,
             '-vf', "scale='min(1920,iw)':-2,format=yuv420p", 
@@ -136,11 +123,23 @@ def background_video_processing(video_id, input_temp_path, safe_filename):
             '-acodec', 'aac', '-movflags', 'faststart',
             processed_video_path
         ]
-        result = subprocess.run(encode_cmd, capture_output=True, text=True)
         
-        if result.returncode != 0:
-            raise Exception(f"FFmpeg encoding failed: {result.stderr}")
+        try:
+            # Add the timeout parameter here
+            result = subprocess.run(
+                encode_cmd, 
+                capture_output=True, 
+                text=True, 
+                timeout=VIDEO_PROCESSING_TIMEOUT
+            )
+            
+            if result.returncode != 0:
+                raise Exception(f"FFmpeg encoding failed: {result.stderr}")
 
+        except subprocess.TimeoutExpired:
+            # Handle the specific case where FFmpeg takes too long
+            raise Exception(f"FFmpeg processing timed out after {VIDEO_PROCESSING_TIMEOUT} seconds.")
+        
         # 2. GENERATE THUMBNAIL
         print(f"[{video_id}] Generating thumbnail...", flush=True)
         thumb_success = generate_thumbnail(processed_video_path, thumb_temp_path, 1.0)
@@ -351,6 +350,7 @@ def upload_video():
         climb_type = request.form.get('climb_type')
         board_type = request.form.get('board_type')
         user_id = request.form.get('user_id')
+        user_name = request.form.get('user_name') # <--- Capture this from the form
         
         # Handle Grade safely
         try:
@@ -365,16 +365,13 @@ def upload_video():
         # 2. Insert into PostgreSQL with 'processing' status
         conn = get_db_connection()
         cur = conn.cursor()
-        
-        # We use RETURNING id so we know which row to update in the background thread
         cur.execute('''
-            INSERT INTO videos (title, climbed_date, grade, climb_type, board_type, tags, user_id, status, thumbnail)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO videos (title, climbed_date, grade, tags, user_id, user_name, status, thumbnail)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         ''', (
-            title, climbed_date, grade, climb_type, board_type, 
-            tags_list, user_id, 'processing', 
-            "https://placehold.co/600x400?text=Processing..."
+            title, climbed_date, grade, tags_list, 
+            user_id, user_name, 'processing', "https://placehold.co/600x400?text=Processing..."
         ))
         
         new_video_id = cur.fetchone()[0]
