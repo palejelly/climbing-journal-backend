@@ -366,7 +366,7 @@ def upload_video():
         board_type = request.form.get('board_type')
         user_id = request.form.get('user_id')
         user_name = request.form.get('user_name') 
-        
+
         send_raw = request.form.get('send', 'false').lower()
         is_send = True if send_raw == 'true' else False
 
@@ -447,11 +447,22 @@ def update_video(video_id):
         cur.execute('''
             UPDATE videos 
             SET title = COALESCE(%s, title), 
-                tags = COALESCE(%s, tags)
+                tags = COALESCE(%s, tags),
+                grade = COALESCE(%s, grade),
+                send = COALESCE(%s, send),
+                climb_type = COALESCE(%s, climb_type),
+                board_type = COALESCE(%s, board_type)
             WHERE id = %s
             RETURNING *
-        ''', (title, tags, video_id))
-        
+        ''', (
+            title, 
+            tags, 
+            data.get('grade'), 
+            data.get('send'), 
+            data.get('climb_type'), 
+            data.get('board_type'), 
+            video_id
+        ))        
         updated_video = cur.fetchone()
         conn.commit()
         

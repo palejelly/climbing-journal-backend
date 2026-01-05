@@ -24,7 +24,10 @@ CREATE TABLE IF NOT EXISTS videos (
     
     -- Processing State
     status TEXT DEFAULT 'processing',
+
     
+    send BOOLEAN DEFAULT FALSE, 
+
     -- Timestamps for better sorting later
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
