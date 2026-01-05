@@ -273,27 +273,18 @@ def get_videos_from_db(user_id=None):
 
 
 def upload_blob_to_azure(blob_service_client, container_name, blob_name, file_stream, content_type):
+    """Uploads a file stream to a specified blob."""
     if not blob_service_client: return None
     try:
         blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_name)
-        
-        # --- FIX: Explicitly set Cache-Control ---
-        # This tells the browser/Azure "It's okay to cache this, but support ranges"
-        my_content_settings = ContentSettings(
-            content_type=content_type,
-            cache_control="public, max-age=31536000" # Cache for 1 year
-        )
-        
-        blob_client.upload_blob(
-            file_stream, 
-            overwrite=True, 
-            content_settings=my_content_settings
-        )
-        
-        return blob_client.url 
+        print(f"Uploading blob '{blob_name}' to container '{container_name}' with content type '{content_type}'...")
+        blob_client.upload_blob(file_stream, overwrite=True, content_settings=ContentSettings(content_type=content_type))
+        print(f"Blob '{blob_name}' upload successful.")
+        return blob_client.url # Return the URL of the uploaded blob
     except Exception as e:
-        print(f"Error uploading blob: {e}")
+        print(f"Error uploading blob '{blob_name}' to container '{container_name}': {e}")
         return None
+
 
 def generate_thumbnail(video_temp_path, thumb_temp_path, timestamp_sec):
     """
