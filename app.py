@@ -134,7 +134,7 @@ def background_video_processing(video_id, input_temp_path, safe_filename):
             FFMPEG_BINARY, '-y', '-i', input_temp_path,
             '-vf', "scale='min(1920,iw)':-2", 
             '-vcodec', 'libx264', '-crf', '23', '-preset', 'ultrafast',
-            '-c:a', 'copy', '-movflags', 'faststart',
+            '-c:a', 'copy', '-movflags', 'faststart', '-threads', '0', 
             processed_video_path
         ]
         
