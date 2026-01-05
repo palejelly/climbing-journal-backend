@@ -132,8 +132,8 @@ def background_video_processing(video_id, input_temp_path, safe_filename):
         print(f"[{video_id}] Running FFmpeg encoding (Timeout: {VIDEO_PROCESSING_TIMEOUT}s)...", flush=True)
         encode_cmd = [
             FFMPEG_BINARY, '-y', '-i', input_temp_path,
-            '-vf', "scale='min(1920,iw)':-2:flags=bilinear,format=yuv420p", 
-            '-vcodec', 'libx264', '-crf', '26', '-preset', 'faster',
+            '-vf', "scale='min(1920,iw)':-2", 
+            '-vcodec', 'libx264', '-crf', '23', '-preset', 'medium',
             '-c:a', 'copy', '-movflags', 'faststart',
             processed_video_path
         ]
