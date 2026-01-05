@@ -1,6 +1,7 @@
 Flask
 Flask-Cors
 azure-storage-blob
+python-dotenv
 gunicorn # For production deployment on App Service
 werkzeug
 psycopg2-binary

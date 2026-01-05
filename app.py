@@ -44,10 +44,28 @@ VIDEO_PROCESSING_TIMEOUT = 300  # 300 seconds (5 minutes)
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 # Define the path to the static frontend files (assuming they are in a 'frontend' subdirectory)
 STATIC_FOLDER = os.path.join(BASE_DIR, 'frontend')
+FFMPEG_BINARY = os.path.join(BASE_DIR, 'bin', 'ffmpeg')
+
 
 app = Flask(__name__, static_folder=STATIC_FOLDER, static_url_path='')
 
-video_cache = None  # Global cache variable
+def ensure_ffmpeg_permissions():
+    if os.path.exists(FFMPEG_BINARY):
+        try:
+            print(f"🔧 Setting executable permissions for: {FFMPEG_BINARY}", flush=True)
+            os.chmod(FFMPEG_BINARY, 0o755)
+        except Exception as e:
+            print(f"❌ Could not set permissions: {e}", flush=True)
+
+def get_db_connection():
+    try:
+        conn = psycopg2.connect(**DB_CONFIG, sslmode='require')
+        return conn
+    except Exception as e:
+        print(f"Database connection error: {e}", flush=True)
+        return None
+
+
 
 try: 
     from flask_cors import CORS
@@ -63,14 +81,6 @@ except:
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-
-def get_db_connection():
-    try:
-        conn = psycopg2.connect(**DB_CONFIG, sslmode='require')
-        return conn
-    except Exception as e:
-        print(f"Database connection error: {e}", flush=True)
-        return None
 
 
 def init_db():
@@ -97,11 +107,15 @@ def init_db():
     conn.commit()
     cur.close()
     conn.close()
+
     return
 
-# Run this once when the app starts
+# Run initialization
+ensure_ffmpeg_permissions()
 init_db()
 
+
+# --- Core Logic --- 
 
 def background_video_processing(video_id, input_temp_path, safe_filename):
     temp_dir = os.path.dirname(input_temp_path)
@@ -117,7 +131,7 @@ def background_video_processing(video_id, input_temp_path, safe_filename):
         # 1. FFmpeg: SCALE AND RE-ENCODE WITH TIMEOUT
         print(f"[{video_id}] Running FFmpeg encoding (Timeout: {VIDEO_PROCESSING_TIMEOUT}s)...", flush=True)
         encode_cmd = [
-            'ffmpeg', '-y', '-i', input_temp_path,
+            FFMPEG_BINARY, '-y', '-i', input_temp_path,
             '-vf', "scale='min(1920,iw)':-2:flags=bilinear,format=yuv420p", 
             '-vcodec', 'libx264', '-crf', '26', '-preset', 'faster',
             '-c:a', 'copy', '-movflags', 'faststart',
@@ -279,7 +293,7 @@ def generate_thumbnail(video_temp_path, thumb_temp_path, timestamp_sec):
         # Construct the command
         # -ss BEFORE -i is much faster (fast-seek)
         cmd = [
-            'ffmpeg',
+            FFMPEG_BINARY,
             '-y',                 # Overwrite output file if it exists
             '-ss', str(timestamp_sec), 
             '-i', video_temp_path, 
@@ -503,3 +517,24 @@ if __name__ == '__main__':
          print("\n*** WARNING: AZURE_STORAGE_CONNECTION_STRING environment variable is not set. API calls will likely fail. ***\n")
 
     app.run(host='0.0.0.0', port=3000, debug=True) # Keep debug=True for local dev
+
+
+@app.route('/api/debug', methods=['GET'])
+def debug_ffmpeg():
+    results = {
+        "binary_path": FFMPEG_BINARY,
+        "exists": os.path.exists(FFMPEG_BINARY),
+        "is_executable": os.access(FFMPEG_BINARY, os.X_OK) if os.path.exists(FFMPEG_BINARY) else False,
+        "ffmpeg_version_output": None,
+        "error": None
+    }
+    
+    if results["exists"]:
+        try:
+            # Try to run 'ffmpeg -version'
+            res = subprocess.run([FFMPEG_BINARY, '-version'], capture_output=True, text=True, timeout=5)
+            results["ffmpeg_version_output"] = res.stdout.split('\n')[0] # Get first line
+        except Exception as e:
+            results["error"] = str(e)
+    
+    return jsonify(results)
