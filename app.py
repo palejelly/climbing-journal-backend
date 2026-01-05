@@ -38,7 +38,7 @@ THUMBNAIL_TIME_SECONDS = 5.0 # Time in seconds to grab the frame
 THUMBNAIL_FILENAME_SUFFIX = '_thumb.jpg' # Suffix for thumbnail files
 THUMBNAIL_CONTENT_TYPE = 'image/jpeg'
 
-VIDEO_PROCESSING_TIMEOUT = 300  # 300 seconds (5 minutes)
+VIDEO_PROCESSING_TIMEOUT = 420  # 420 seconds (7 minutes)
 
 # Determine the absolute path to the directory this script is in
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -133,7 +133,7 @@ def background_video_processing(video_id, input_temp_path, safe_filename):
         encode_cmd = [
             FFMPEG_BINARY, '-y', '-i', input_temp_path,
             '-vf', "scale='min(1920,iw)':-2", 
-            '-vcodec', 'libx264', '-crf', '23', '-preset', 'medium',
+            '-vcodec', 'libx264', '-crf', '23', '-preset', 'ultrafast',
             '-c:a', 'copy', '-movflags', 'faststart',
             processed_video_path
         ]
