@@ -98,6 +98,7 @@ def init_db():
             board_type TEXT,
             thumbnail TEXT,
             video_url TEXT,
+            send BOOLEAN DEFAULT FALSE,
             tags TEXT[],
             user_id TEXT,
             user_name TEXT,
@@ -364,8 +365,11 @@ def upload_video():
         climb_type = request.form.get('climb_type')
         board_type = request.form.get('board_type')
         user_id = request.form.get('user_id')
-        user_name = request.form.get('user_name') # <--- Capture this from the form
+        user_name = request.form.get('user_name') 
         
+        send_raw = request.form.get('send', 'false').lower()
+        is_send = True if send_raw == 'true' else False
+
         # Handle Grade safely
         try:
             grade = int(request.form.get('grade', 0))
@@ -380,12 +384,12 @@ def upload_video():
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute('''
-            INSERT INTO videos (title, climbed_date, grade, tags, user_id, user_name, status, thumbnail)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO videos (title, climbed_date, grade, tags, user_id, user_name, status, thumbnail, send)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         ''', (
             title, climbed_date, grade, tags_list, 
-            user_id, user_name, 'processing', "https://placehold.co/600x400?text=Processing..."
+            user_id, user_name, 'processing', "https://placehold.co/600x400?text=Processing...", is_send
         ))
         
         new_video_id = cur.fetchone()[0]
