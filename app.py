@@ -38,7 +38,7 @@ THUMBNAIL_TIME_SECONDS = 5.0 # Time in seconds to grab the frame
 THUMBNAIL_FILENAME_SUFFIX = '_thumb.jpg' # Suffix for thumbnail files
 THUMBNAIL_CONTENT_TYPE = 'image/jpeg'
 
-VIDEO_PROCESSING_TIMEOUT = 420  # 420 seconds (7 minutes)
+VIDEO_PROCESSING_TIMEOUT = 600  # 600 seconds (10 minutes)
 
 # Determine the absolute path to the directory this script is in
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
