@@ -87,7 +87,8 @@ def init_db():
     conn = get_db_connection()
     if not conn: return
     cur = conn.cursor()
-    # Using TEXT[] for tags allows us to use Postgres' powerful array searching
+
+    # CREATE videos metadata table if it doesn't exist
     cur.execute('''
         CREATE TABLE IF NOT EXISTS public.videos (
             id SERIAL PRIMARY KEY,
@@ -108,6 +109,23 @@ def init_db():
             status TEXT DEFAULT 'processing'
         );
     ''')
+
+    # CREATE comments table if it doesn't exist
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS public.comments (
+            id SERIAL PRIMARY KEY,
+            video_id INTEGER NOT NULL,
+            user_id TEXT NOT NULL,
+            user_name TEXT NOT NULL,
+            comment_text TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT fk_video
+                FOREIGN KEY(video_id) 
+                REFERENCES videos(id)
+                ON DELETE CASCADE
+        );
+    ''')
+
     conn.commit()
     cur.close()
     conn.close()
@@ -321,8 +339,7 @@ def generate_thumbnail(video_temp_path, thumb_temp_path, timestamp_sec):
         return False
 
 
-# --- API Routes ---
-
+# --- Video API Routes ---
 
 @app.route('/api/videos', methods=['GET'])
 def get_videos():
@@ -546,7 +563,165 @@ def delete_video(video_id):
     return jsonify({"message": "Deleted successfully"})
 
 
-# --- Route to serve the frontend ---
+# --- Comment Routes ---
+
+@app.route('/api/videos/<int:video_id>/comments', methods=['GET'])
+def get_comments(video_id):
+    conn = get_db_connection()
+    if not conn: return jsonify([])
+    
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        # Get comments, newest first
+        cur.execute("""
+            SELECT * FROM comments 
+            WHERE video_id = %s 
+            ORDER BY created_at DESC
+        """, (video_id,))
+        comments = cur.fetchall()
+        
+        # Format dates to string
+        for c in comments:
+            if c['created_at']:
+                c['created_at'] = c['created_at'].strftime('%Y-%m-%d %H:%M')
+                
+        return jsonify(comments)
+    except Exception as e:
+        print(f"Error getting comments: {e}")
+        return jsonify([])
+    finally:
+        cur.close()
+        conn.close()
+
+@app.route('/api/videos/<int:video_id>/comments', methods=['POST'])
+def add_comment(video_id):
+    data = request.get_json()
+    if not data or 'text' not in data:
+        return jsonify({"error": "Comment text required"}), 400
+
+    user_id = data.get('user_id')
+    user_name = data.get('user_name', 'Anonymous')
+    text = data.get('text')
+
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            INSERT INTO comments (video_id, user_id, user_name, comment_text)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id, created_at
+        """, (video_id, user_id, user_name, text))
+        
+        result = cur.fetchone()
+        conn.commit()
+        
+        # Return the new comment data so frontend can update immediately
+        return jsonify({
+            "id": result['id'],
+            "video_id": video_id,
+            "user_id": user_id,
+            "user_name": user_name,
+            "comment_text": text,
+            "created_at": result['created_at'].strftime('%Y-%m-%d %H:%M')
+        })
+    except Exception as e:
+        print(f"Error adding comment: {e}")
+        return jsonify({"error": "Failed to add comment"}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+@app.route('/api/comments/<int:comment_id>', methods=['PUT'])
+def update_comment(comment_id):
+    data = request.get_json()
+    new_text = data.get('text')
+    request_user_id = data.get('user_id') # Passed from frontend to verify ownership
+
+    if not new_text or not request_user_id:
+        return jsonify({"error": "Missing data"}), 400
+
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # 1. Verify ownership
+        cur.execute("SELECT user_id FROM comments WHERE id = %s", (comment_id,))
+        comment = cur.fetchone()
+        
+        if not comment:
+            return jsonify({"error": "Comment not found"}), 404
+            
+        if str(comment['user_id']) != str(request_user_id):
+            return jsonify({"error": "Unauthorized"}), 403
+
+        # 2. Update
+        cur.execute("""
+            UPDATE comments 
+            SET comment_text = %s 
+            WHERE id = %s 
+            RETURNING *
+        """, (new_text, comment_id))
+        
+        updated_comment = cur.fetchone()
+        conn.commit()
+        
+        # Format date for consistency
+        if updated_comment['created_at']:
+            updated_comment['created_at'] = updated_comment['created_at'].strftime('%Y-%m-%d %H:%M')
+
+        return jsonify(updated_comment)
+
+    except Exception as e:
+        print(f"Error updating comment: {e}")
+        return jsonify({"error": "Update failed"}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+@app.route('/api/comments/<int:comment_id>', methods=['DELETE'])
+def delete_comment(comment_id):
+    data = request.get_json()
+    request_user_id = data.get('user_id')
+
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        
+        # 1. Verify ownership
+        cur.execute("SELECT user_id FROM comments WHERE id = %s", (comment_id,))
+        comment = cur.fetchone() # returns tuple in standard cursor, or dict in RealDict
+        
+        # Handle tuple vs dict depending on cursor factory (standard cursor returns tuple)
+        # To be safe, let's fetch strictly as tuple for this check
+        if not comment:
+            return jsonify({"error": "Comment not found"}), 404
+
+        # Standard cursor returns tuple (user_id,)
+        # RealDictCursor returns {'user_id': ...}
+        # Since we initialized RealDictCursor in previous snippets, let's assume dict access:
+        # BUT strictly speaking, get_db_connection returns a raw connection. 
+        # Let's write query to handle check safely.
+        
+        db_user_id = comment[0] if isinstance(comment, tuple) else comment['user_id']
+
+        if str(db_user_id) != str(request_user_id):
+             return jsonify({"error": "Unauthorized"}), 403
+
+        # 2. Delete
+        cur.execute("DELETE FROM comments WHERE id = %s", (comment_id,))
+        conn.commit()
+        
+        return jsonify({"message": "Deleted successfully"})
+
+    except Exception as e:
+        print(f"Error deleting comment: {e}")
+        return jsonify({"error": "Delete failed"}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
+# --- Route to serve the frontend (obsolete not used) ---
 # This remains the same, serving index.html from the local 'frontend' folder
 @app.route('/')
 def serve_index():
