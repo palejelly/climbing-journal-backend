@@ -96,6 +96,9 @@ def init_db():
             grade INTEGER,
             climb_type TEXT,
             board_type TEXT,
+            climb_url TEXT,
+            board_angle INTEGER,
+            description TEXT,
             thumbnail TEXT,
             video_url TEXT,
             send BOOLEAN DEFAULT FALSE,
@@ -364,8 +367,14 @@ def upload_video():
         climbed_date = request.form.get('climbed_date')
         climb_type = request.form.get('climb_type')
         board_type = request.form.get('board_type')
+
+        raw_angle = request.form.get('board_angle')
+        board_angle = int(raw_angle) if raw_angle and raw_angle.strip() != '' else None
+
         user_id = request.form.get('user_id')
         user_name = request.form.get('user_name') 
+        description = request.form.get('description', '').strip()
+        climb_url = request.form.get('climb_url', '')
 
         send_raw = request.form.get('send', 'false').lower()
         is_send = True if send_raw == 'true' else False
@@ -384,12 +393,26 @@ def upload_video():
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute('''
-            INSERT INTO videos (title, climbed_date, grade, tags, user_id, user_name, status, thumbnail, send)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO videos (
+                    title, 
+                    climbed_date, 
+                    climb_type, 
+                    board_type,
+                    board_angle,
+                    grade, 
+                    tags, 
+                    user_id, 
+                    user_name, 
+                    status, 
+                    thumbnail, 
+                    send, 
+                    description, 
+                    climb_url)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         ''', (
-            title, climbed_date, grade, tags_list, 
-            user_id, user_name, 'processing', "https://placehold.co/600x400?text=Processing...", is_send
+            title, climbed_date, climb_type, board_type, board_angle, grade, tags_list, 
+            user_id, user_name, 'processing', "https://placehold.co/600x400?text=Processing...", is_send, description, climb_url
         ))
         
         new_video_id = cur.fetchone()[0]
@@ -447,20 +470,28 @@ def update_video(video_id):
         cur.execute('''
             UPDATE videos 
             SET title = COALESCE(%s, title), 
+                climbed_date = %s,
                 tags = COALESCE(%s, tags),
                 grade = COALESCE(%s, grade),
                 send = COALESCE(%s, send),
                 climb_type = COALESCE(%s, climb_type),
-                board_type = COALESCE(%s, board_type)
+                board_type = COALESCE(%s, board_type),
+                board_angle = %s,
+                description = COALESCE(%s, description),
+                climb_url = COALESCE(%s, climb_url)
             WHERE id = %s
             RETURNING *
         ''', (
             title, 
+            data.get('climbed_date'),
             tags, 
             data.get('grade'), 
             data.get('send'), 
             data.get('climb_type'), 
             data.get('board_type'), 
+            data.get('board_angle'),
+            data.get('description'),
+            data.get('climb_url'),
             video_id
         ))        
         updated_video = cur.fetchone()
