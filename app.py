@@ -178,7 +178,7 @@ def background_video_processing(video_id, input_temp_path, safe_filename):
         
         # 2. GENERATE THUMBNAIL
         print(f"[{video_id}] Generating thumbnail...", flush=True)
-        thumb_success = generate_thumbnail(processed_video_path, thumb_temp_path, 1.0)
+        thumb_success = generate_thumbnail(processed_video_path, thumb_temp_path, 3.0)
         if not thumb_success:
             print(f"[{video_id}] Warning: Thumbnail generation failed, using placeholder.", flush=True)
 
