@@ -379,52 +379,51 @@ def get_tags():
 @app.route('/api/upload', methods=['POST'])
 def upload_video():
     try:
-        # 1. Collect form data
+        # --- FIX: CHECK FILE FIRST ---
+        # 1. Validate file presence immediately
+        if 'videoFile' not in request.files:
+            return jsonify({"error": "No video file part"}), 400
+            
+        file = request.files['videoFile']
+        
+        # Check if user submitted an empty part without filename
+        if file.filename == '':
+            return jsonify({"error": "No selected file"}), 400
+            
+        if not file:
+            return jsonify({"error": "Invalid file"}), 400
+        # -----------------------------
+
+        # 2. Collect form data
         title = request.form.get('title', 'Untitled')
         climbed_date = request.form.get('climbed_date')
         climb_type = request.form.get('climb_type')
         board_type = request.form.get('board_type')
-
+        
         raw_angle = request.form.get('board_angle')
         board_angle = int(raw_angle) if raw_angle and raw_angle.strip() != '' else None
-
         user_id = request.form.get('user_id')
         user_name = request.form.get('user_name') 
         description = request.form.get('description', '').strip()
         climb_url = request.form.get('climb_url', '')
-
         send_raw = request.form.get('send', 'false').lower()
         is_send = True if send_raw == 'true' else False
-
-        # Handle Grade safely
         try:
             grade = int(request.form.get('grade', 0))
         except (ValueError, TypeError):
             grade = 0
-            
-        # Handle Tags (Convert comma-string to Python list)
         tags_raw = request.form.get('tags', '')
         tags_list = [t.strip() for t in tags_raw.split(',') if t.strip()]
 
-        # 2. Insert into PostgreSQL with 'processing' status
+
+        # 3. Insert into PostgreSQL (NOW SAFE to do)
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute('''
             INSERT INTO videos (
-                    title, 
-                    climbed_date, 
-                    climb_type, 
-                    board_type,
-                    board_angle,
-                    grade, 
-                    tags, 
-                    user_id, 
-                    user_name, 
-                    status, 
-                    thumbnail, 
-                    send, 
-                    description, 
-                    climb_url)
+                    title, climbed_date, climb_type, board_type, board_angle,
+                    grade, tags, user_id, user_name, status, 
+                    thumbnail, send, description, climb_url)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         ''', (
@@ -437,14 +436,15 @@ def upload_video():
         cur.close()
         conn.close()
 
-        # 3. Handle the File
-        file = request.files['videoFile']
+        # 4. Save File & Start Thread
         temp_dir = tempfile.mkdtemp(prefix='processing_')
         safe_filename = file.filename.replace(" ", "_")
         video_temp_path = os.path.join(temp_dir, safe_filename)
+        
+        # If this save fails (e.g. disk full), we still have a DB row, 
+        # but at least we know the network transfer finished successfully.
         file.save(video_temp_path)
 
-        # 4. Start Background Thread
         thread = threading.Thread(
             target=background_video_processing, 
             args=(new_video_id, video_temp_path, safe_filename)
@@ -458,8 +458,7 @@ def upload_video():
 
     except Exception as e:
         print(f"Upload error: {e}", flush=True)
-        return jsonify({"error": str(e)}), 500
-        
+        return jsonify({"error": str(e)}), 500        
 
 # updating video
 @app.route('/api/videos/<int:video_id>', methods=['PUT'])
